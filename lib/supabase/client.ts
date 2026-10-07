@@ -10,6 +10,14 @@ export function getSupabase(): SupabaseClient | null {
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
   if (!url || !key) return null;
-  if (!supabase) supabase = createBrowserClient(url, key);
+  if (!supabase) {
+    supabase = createBrowserClient(url, key, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
+    });
+  }
   return supabase;
 }

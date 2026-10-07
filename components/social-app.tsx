@@ -12,7 +12,6 @@ import {
   Heart,
   Home,
   Image as ImageIcon,
-  LogOut,
   Menu,
   MessageCircle,
   MessageSquare,
@@ -31,9 +30,9 @@ import {
   X,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { Comment, currentPerson, initialPosts, people, Person, Post, ReactionType } from "@/lib/data";
+import { Comment, DEFAULT_AVATAR, Person, Post, ReactionType } from "@/lib/data";
 import { getSupabase } from "@/lib/supabase/client";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Session, SupabaseClient } from "@supabase/supabase-js";
 
 type PageKey = "feed" | "friends" | "messages" | "saved" | "settings";
 type AuthMode = "signin" | "signup";
@@ -63,17 +62,9 @@ function toPerson(relation: ProfileRow | ProfileRow[] | null, fallbackId: string
     id: profile?.id || fallbackId,
     name: profile?.display_name || "MahinBook member",
     handle: profile?.username || "member",
-    avatar: profile?.avatar_url || currentPerson.avatar,
+    avatar: profile?.avatar_url || DEFAULT_AVATAR,
   };
 }
-
-const stories = [
-  { name: "Your story", avatar: currentPerson.avatar, isOwn: true },
-  { name: "Sofia", avatar: people[0].avatar, color: "#e4c29a" },
-  { name: "Noah", avatar: people[1].avatar, color: "#b9d5c8" },
-  { name: "Amara", avatar: people[2].avatar, color: "#edc0b3" },
-  { name: "Mina", avatar: people[4].avatar, color: "#d2c1e5" },
-];
 
 const pageLabels: Record<PageKey, string> = {
   feed: "Your feed",
@@ -91,14 +82,14 @@ function timeAgo(value: string) {
 }
 
 export default function SocialApp() {
-  const [posts, setPosts] = useState<Post[]>(initialPosts);
+  const [posts, setPosts] = useState<Post[]>([]);
   const [page, setPage] = useState<PageKey>("feed");
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
   const [postMedia, setPostMedia] = useState<File | null>(null);
   const [postVisibility, setPostVisibility] = useState<"public" | "friends" | "private">("public");
   const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
-  const [expandedComments, setExpandedComments] = useState<string[]>(["post-1"]);
+  const [expandedComments, setExpandedComments] = useState<string[]>([]);
   const [savedPosts, setSavedPosts] = useState<string[]>([]);
   const [friendships, setFriendships] = useState<FriendshipRow[]>([]);
   const [suggestedProfiles, setSuggestedProfiles] = useState<ProfileRow[]>([]);
@@ -110,8 +101,9 @@ export default function SocialApp() {
   const [editPostText, setEditPostText] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [user, setUser] = useState<{ id: string; email?: string; name: string; avatar?: string } | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const [databaseReady, setDatabaseReady] = useState(false);
-  const [authMode, setAuthMode] = useState<AuthMode | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode>("signin");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authName, setAuthName] = useState("");
@@ -128,9 +120,9 @@ export default function SocialApp() {
         id: user.id,
         name: profile?.display_name || user.name,
         handle: profile?.username || user.name.toLowerCase().replace(/[^a-z0-9]+/g, ""),
-        avatar: profile?.avatar_url || user.avatar || currentPerson.avatar,
+        avatar: profile?.avatar_url || user.avatar || DEFAULT_AVATAR,
       }
-    : currentPerson;
+    : { id: "", name: "", handle: "", avatar: DEFAULT_AVATAR };
 
   const showNotice = useCallback((message: string) => {
     setNotice(message);
@@ -140,7 +132,7 @@ export default function SocialApp() {
   const loadPosts = useCallback(async () => {
     const client = getSupabase();
     if (!client || !user) {
-      setPosts(initialPosts);
+      setPosts([]);
       return;
     }
     const { data, error: queryError } = await client
@@ -178,26 +170,23 @@ export default function SocialApp() {
   }, [user]);
 
   useEffect(() => {
-    if (!supabase) return;
+    if (!supabase) {
+      setAuthReady(true);
+      return;
+    }
     let alive = true;
-    supabase.auth.getSession().then(({ data }) => {
+    const applySession = (session: Session | null) => {
       if (!alive) return;
-      const sessionUser = data.session?.user;
-      if (!sessionUser) setDatabaseReady(false);
-      setUser(
-        sessionUser
-          ? {
-              id: sessionUser.id,
-              email: sessionUser.email,
-              name: sessionUser.user_metadata?.display_name || sessionUser.email?.split("@")[0] || "Your profile",
-              avatar: sessionUser.user_metadata?.avatar_url,
-            }
-          : null,
-      );
-    });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       const sessionUser = session?.user;
-      if (!sessionUser) setDatabaseReady(false);
+      if (!sessionUser) {
+        setDatabaseReady(false);
+        setProfile(null);
+        setPosts([]);
+        setFriendships([]);
+        setSuggestedProfiles([]);
+        setNotifications([]);
+        setSearchProfiles([]);
+      }
       setUser(
         sessionUser
           ? {
@@ -208,7 +197,18 @@ export default function SocialApp() {
             }
           : null,
       );
+      setAuthReady(true);
+    };
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      applySession(session);
     });
+    void supabase.auth.getSession()
+      .then(({ data }) => applySession(data.session))
+      .catch(() => {
+        if (!alive) return;
+        setError("Could not restore your session. Please sign in again.");
+        setAuthReady(true);
+      });
     return () => {
       alive = false;
       listener.subscription.unsubscribe();
@@ -431,7 +431,10 @@ export default function SocialApp() {
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!supabase) return;
+    if (!supabase) {
+      setError("Sign-in is unavailable because Supabase is not configured.");
+      return;
+    }
     setBusy(true);
     setError("");
     const response =
@@ -448,17 +451,21 @@ export default function SocialApp() {
       return;
     }
     if (authMode === "signup" && !response.data.session) {
-      setAuthMode(null);
-      showNotice("Check your email to finish creating your account.");
+      setAuthMode("signin");
+      setAuthPassword("");
+      setError("Check your email to finish creating your account, then sign in.");
       return;
     }
-    setAuthMode(null);
+    setAuthMode("signin");
     setAuthPassword("");
     showNotice(authMode === "signup" ? "Welcome to the neighborhood!" : "Welcome back!");
   }
 
-  async function signInWith(provider: "google" | "github") {
-    if (!supabase) return;
+  async function signInWith(provider: "google") {
+    if (!supabase) {
+      setError("Sign-in is unavailable because Supabase is not configured.");
+      return;
+    }
     setError("");
     const { error: authError } = await supabase.auth.signInWithOAuth({
       provider,
@@ -521,7 +528,7 @@ export default function SocialApp() {
       if (signOutError) throw new Error(`Your account was deleted, but this device could not sign out: ${signOutError.message}`);
       setUser(null);
       setIsPrivate(false);
-      setPosts(initialPosts);
+      setPosts([]);
       setPage("feed");
       showNotice("Your account and associated data have been deleted.");
     } catch (deleteError) {
@@ -717,6 +724,37 @@ export default function SocialApp() {
     setError("");
   }
 
+  if (!authReady) {
+    return <main className="auth-gate"><p role="status">Restoring your session…</p></main>;
+  }
+
+  if (!user) {
+    return (
+      <main className="auth-gate">
+        <section className="auth-modal auth-gate-card" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+          <span className="auth-mark"><span className="brand-mark"><span /></span></span>
+          <p className="eyebrow">A LITTLE MORE TOGETHER</p>
+          <h2 id="auth-title">{authMode === "signup" ? "Come on in." : "Good to see you."}</h2>
+          <p className="auth-copy">{authMode === "signup" ? "Make a little space for your people." : "Sign in to see your community."}</p>
+          {!supabase && <p className="auth-error" role="alert">Sign-in is unavailable because Supabase is not configured.</p>}
+          <div className="oauth-row auth-oauth-single">
+            <button type="button" disabled={!supabase || busy} onClick={() => void signInWith("google")}><span className="google-g">G</span> Continue with Google</button>
+          </div>
+          <div className="or-divider"><span /> or with email <span /></div>
+          <form onSubmit={submitAuth} className="auth-form">
+            {authMode === "signup" && <label>Your name<input value={authName} onChange={(event) => setAuthName(event.target.value)} placeholder="What should we call you?" required /></label>}
+            <label>Email address<input type="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com" autoComplete="email" required /></label>
+            <label>Password<input type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="At least 6 characters" autoComplete={authMode === "signup" ? "new-password" : "current-password"} minLength={6} required /></label>
+            {error && <p className="auth-error" role="alert">{error}</p>}
+            <button className="auth-submit" type="submit" disabled={busy || !supabase}>{busy ? "One moment…" : authMode === "signup" ? "Create your account" : "Sign in"} <ChevronRight size={17} /></button>
+          </form>
+          <p className="auth-switch">{authMode === "signup" ? "Already have an account?" : "New here?"} <button type="button" onClick={() => { setError(""); setAuthPassword(""); setAuthMode(authMode === "signup" ? "signin" : "signup"); }}>{authMode === "signup" ? "Sign in" : "Create an account"}</button></p>
+          <small className="auth-privacy">Your session will stay signed in on this device until you sign out.</small>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -743,10 +781,10 @@ export default function SocialApp() {
               }}><Bell size={19} />{notifications.some((item) => !item.read_at) && <span className="notification-dot" />}</button>
               {notificationsOpen && <NotificationsPanel notifications={notifications} onClose={() => setNotificationsOpen(false)} onRefresh={() => void loadNotifications()} />}
             </div>
-            <button className="account-chip" onClick={() => user ? signOut() : setAuthMode("signin")} title={user ? "Sign out" : "Sign in"}>
-              <img src={displayPerson.avatar} alt="" />
-              <span>{user ? displayPerson.name.split(" ")[0] : "Sign in"}</span>
-              {user ? <LogOut size={15} /> : <ChevronDown size={15} />}
+          <button className="account-chip" onClick={() => navTo("settings")} title="Open settings">
+            <img src={displayPerson.avatar} alt="" />
+            <span>{displayPerson.name.split(" ")[0]}</span>
+            <ChevronDown size={15} />
             </button>
           </div>
         </div>
@@ -780,13 +818,13 @@ export default function SocialApp() {
             <Sparkles size={16} />
             <p>A little more meaningful, a little more together.</p>
           </div>
-          <div className="rail-footer"><span>About</span><span>Privacy</span><span>Community</span><span>© 2025 MahinBook</span></div>
+          <div className="rail-footer"><span>About</span><span>Privacy</span><span>Community</span><span>© {new Date().getFullYear()} MahinBook</span></div>
         </aside>
 
         <section className="feed-column">
           <div className="welcome-row">
             <div>
-              <p className="eyebrow">{page === "feed" ? "WEDNESDAY, OCTOBER 7" : "YOUR COMMUNITY"}</p>
+              <p className="eyebrow">YOUR COMMUNITY</p>
               <h1>{pageLabels[page]}<span className="title-sparkle">✳</span></h1>
               <p className="welcome-subtitle">{page === "feed" ? "Good things are happening around you." : getPageSubtitle(page)}</p>
             </div>
@@ -802,27 +840,6 @@ export default function SocialApp() {
 
           {page === "feed" && (
             <>
-              <div className="stories-card">
-                <div className="section-heading">
-                  <div><strong>Little moments</strong><span>Stories from your people</span></div>
-                  <button className="text-button" onClick={() => showNotice("You’re all caught up on stories.")}>See all <ChevronRight size={15} /></button>
-                </div>
-                <div className="stories-list">
-                  {stories.map((story) => (
-                    <button className="story" key={story.name} onClick={() => story.isOwn ? setComposerOpen(true) : showNotice(`${story.name}’s story is coming right up.`)}>
-                      <span className={`story-ring ${story.isOwn ? "story-ring-own" : ""}`} style={{ backgroundColor: story.color || "#dcebe5" }}>
-                        <img src={story.avatar} alt="" />
-                        {story.isOwn && <span className="story-add">+</span>}
-                      </span>
-                      <span>{story.name}</span>
-                    </button>
-                  ))}
-                  <button className="story story-more" onClick={() => showNotice("More stories are on their way.")}>
-                    <span className="more-story"><ChevronRight size={20} /></span><span>See more</span>
-                  </button>
-                </div>
-              </div>
-
               <form className="composer-card" onSubmit={createPost}>
                 <div className="composer-top">
                   <img src={displayPerson.avatar} alt="" />
@@ -857,7 +874,7 @@ export default function SocialApp() {
                   <div className="side-heading"><div><strong>People</strong><span>Matching profiles</span></div></div>
                   {searchProfiles.map((result) => {
                     const relation = friendships.find((friendship) => friendship.requester_id === result.id || friendship.addressee_id === result.id);
-                    return <div className="search-person" key={result.id}><img src={result.avatar_url || currentPerson.avatar} alt="" /><span><strong>{result.display_name}</strong><small>@{result.username || "member"}</small></span>{relation?.status === "accepted" ? <small>Friends</small> : relation?.status === "pending" && relation.requester_id === user?.id ? <small>Request sent</small> : relation?.status === "pending" ? <><button onClick={() => void respondFriendRequest(relation.id, "accepted")}>Accept</button><button className="secondary" onClick={() => void respondFriendRequest(relation.id, "declined")}>Decline</button></> : relation?.status === "blocked" ? <small>Unavailable</small> : <button onClick={() => void sendFriendRequest(result.id)}>Add friend</button>}</div>;
+                    return <div className="search-person" key={result.id}><img src={result.avatar_url || DEFAULT_AVATAR} alt="" /><span><strong>{result.display_name}</strong><small>@{result.username || "member"}</small></span>{relation?.status === "accepted" ? <small>Friends</small> : relation?.status === "pending" && relation.requester_id === user?.id ? <small>Request sent</small> : relation?.status === "pending" ? <><button onClick={() => void respondFriendRequest(relation.id, "accepted")}>Accept</button><button className="secondary" onClick={() => void respondFriendRequest(relation.id, "declined")}>Decline</button></> : relation?.status === "blocked" ? <small>Unavailable</small> : <button onClick={() => void sendFriendRequest(result.id)}>Add friend</button>}</div>;
                   })}
                 </section>
               )}
@@ -932,18 +949,12 @@ export default function SocialApp() {
         </section>
 
         <aside className="right-rail">
-          <div className="weather-card">
-            <div className="weather-top"><span>YOUR LITTLE CORNER</span><button aria-label="More weather options" onClick={() => showNotice("Good weather for a little walk.")}><MoreHorizontal size={19} /></button></div>
-            <div className="weather-main"><span className="sun-icon">☼</span><div><strong>72°</strong><span>San Francisco, CA</span></div></div>
-            <p>A lovely day to say hello to someone.</p>
-            <div className="weather-bottom"><span>Mostly sunny</span><span>H 75° <i /> L 59°</span></div>
-          </div>
           <section className="side-section">
             <div className="side-heading"><div><strong>People you may know</strong><span>A few friendly faces</span></div><button aria-label="See all suggestions" onClick={() => navTo("friends")}><ChevronRight size={17} /></button></div>
             <div className="suggestion-list">
               {suggestedProfiles.map((person) => (
                 <div className="suggestion" key={person.id}>
-                  <img src={person.avatar_url || currentPerson.avatar} alt="" />
+                  <img src={person.avatar_url || DEFAULT_AVATAR} alt="" />
                   <div className="suggestion-info"><strong>{person.display_name}</strong><span>@{person.username || "member"}</span></div>
                   <button className="add-friend" aria-label={`Add ${person.display_name}`} onClick={() => user ? void sendFriendRequest(person.id) : setAuthMode("signin")}>+</button>
                 </div>
@@ -952,17 +963,6 @@ export default function SocialApp() {
             </div>
             <button className="see-all-link" onClick={() => navTo("friends")}>See all suggestions <ChevronRight size={14} /></button>
           </section>
-          <section className="side-section birthdays">
-            <div className="side-heading"><div><strong>A reason to celebrate</strong><span>Coming up this week</span></div><span className="party-emoji">🎈</span></div>
-            <div className="birthday-row"><div className="birthday-icon">🎂</div><p><strong>Mina Park</strong>’s birthday is in <b>2 days</b></p></div>
-          </section>
-          <section className="side-section online-section">
-            <div className="side-heading"><div><strong>Around right now</strong><span>Good people, online</span></div><span className="online-count">3</span></div>
-            <div className="online-faces">{people.filter((person) => person.online).map((person) => (
-              <button key={person.id} title={person.name} onClick={() => navTo("messages")}><img src={person.avatar} alt={person.name} /><i /></button>
-            ))}<span>+ 2</span></div>
-          </section>
-          <div className="good-thought"><span>“</span><p>Almost everything will work again if you unplug it for a few minutes, including you.</p><small>— Anne Lamott</small></div>
         </aside>
       </div>
 
@@ -975,31 +975,6 @@ export default function SocialApp() {
           <button className="auth-submit" disabled={busy || !editPostText.trim()}>{busy ? "Saving…" : "Save changes"} <Check size={15} /></button>
         </form>
       </div>}
-      {authMode && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAuthMode(null); }}>
-          <section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-            <button className="modal-close" aria-label="Close" onClick={() => { setAuthMode(null); setError(""); }}><X size={19} /></button>
-            <span className="auth-mark"><span className="brand-mark"><span /></span></span>
-            <p className="eyebrow">A LITTLE MORE TOGETHER</p>
-            <h2 id="auth-title">{authMode === "signup" ? "Come on in." : "Good to see you."}</h2>
-            <p className="auth-copy">{authMode === "signup" ? "Make a little space for your people." : "Pick up right where your people are."}</p>
-            <div className="oauth-row">
-              <button onClick={() => void signInWith("google")}><span className="google-g">G</span> Google</button>
-              <button onClick={() => void signInWith("github")}><span className="github-mark">●</span> GitHub</button>
-            </div>
-            <div className="or-divider"><span /> or with email <span /></div>
-            <form onSubmit={submitAuth} className="auth-form">
-              {authMode === "signup" && <label>Your name<input value={authName} onChange={(event) => setAuthName(event.target.value)} placeholder="What should we call you?" required /></label>}
-              <label>Email address<input type="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com" autoComplete="email" required /></label>
-              <label>Password<input type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="At least 6 characters" autoComplete={authMode === "signup" ? "new-password" : "current-password"} minLength={6} required /></label>
-              {error && <p className="auth-error" role="alert">{error}</p>}
-              <button className="auth-submit" type="submit" disabled={busy}>{busy ? "One moment…" : authMode === "signup" ? "Create your account" : "Sign in"} <ChevronRight size={17} /></button>
-            </form>
-            <p className="auth-switch">{authMode === "signup" ? "Already part of the neighborhood?" : "New around here?"} <button onClick={() => { setError(""); setAuthMode(authMode === "signup" ? "signin" : "signup"); }}>{authMode === "signup" ? "Sign in" : "Create an account"}</button></p>
-            <small className="auth-privacy">By joining, you agree to our community guidelines and privacy policy.</small>
-          </section>
-        </div>
-      )}
     </main>
   );
 }
@@ -1141,7 +1116,7 @@ function FriendsPanel({
         <section className="friend-section"><h3>Your friends <span>{friends.length}</span></h3>        {friends.length ? friends.map((friendship) => <FriendshipRowView key={friendship.id} row={friendship} userId={user.id} supabase={supabase} actions={<button className="secondary" disabled={busy} onClick={() => void action(() => onBlock(friendship.requester_id === user.id ? friendship.addressee_id : friendship.requester_id))}>Block</button>} />) : <p className="muted-copy">Your friend list will show up here when requests are accepted.</p>}</section>
         {blocked.length > 0 && <section className="friend-section"><h3>Blocked</h3>{blocked.map((row) => <FriendshipRowView key={row.id} row={row} userId={user.id} supabase={supabase} actions={<button className="secondary" disabled={busy} onClick={() => void action(() => onUnblock(row.requester_id === user.id ? row.addressee_id : row.requester_id))}>Unblock</button>} />)}</section>}
         <section className="friend-section"><h3>People you may know</h3><div className="friends-grid">
-          {suggestions.map((person) => <article className="friend-card" key={person.id}><img src={person.avatar_url || currentPerson.avatar} alt="" /><strong>{person.display_name}</strong><span>@{person.username || "member"}</span><small>{person.bio || "New to your community"}</small><button disabled={busy} onClick={() => void action(() => onSend(person.id))}><Users size={15} /> Add friend</button></article>)}
+          {suggestions.map((person) => <article className="friend-card" key={person.id}><img src={person.avatar_url || DEFAULT_AVATAR} alt="" /><strong>{person.display_name}</strong><span>@{person.username || "member"}</span><small>{person.bio || "New to your community"}</small><button disabled={busy} onClick={() => void action(() => onSend(person.id))}><Users size={15} /> Add friend</button></article>)}
         </div>{!suggestions.length && <p className="muted-copy">No suggestions yet. Search for people using the bar above.</p>}</section>
       </>}
     </div>
@@ -1159,7 +1134,7 @@ function FriendshipRowView({ row, userId, supabase, actions }: { row: Friendship
     });
     return () => { alive = false; };
   }, [personId, supabase]);
-  return <div className="friendship-row"><img src={person?.avatar || currentPerson.avatar} alt="" /><span><strong>{person?.name || "MahinBook member"}</strong><small>@{person?.handle || "member"}</small></span><div>{actions}</div></div>;
+  return <div className="friendship-row"><img src={person?.avatar || DEFAULT_AVATAR} alt="" /><span><strong>{person?.name || "MahinBook member"}</strong><small>@{person?.handle || "member"}</small></span><div>{actions}</div></div>;
 }
 
 type ConversationSummary = { id: string; title: string | null; is_group: boolean; members: Person[]; lastMessage: string; updatedAt: string };
@@ -1276,14 +1251,14 @@ function MessagesPanel({ supabase, user, friendships, currentUser, onSignIn, onE
         {conversations.map((conversation) => {
           const conversationTitle = conversation.is_group ? conversation.title || conversation.members.map((member) => member.name).join(", ") : conversation.members.find((member) => member.id !== user?.id)?.name || "Conversation";
           return <button className={`message-person ${selectedId === conversation.id ? "message-person-active" : ""}`} key={conversation.id} onClick={() => setSelectedId(conversation.id)}>
-            <span className="message-avatar"><img src={conversation.members.find((member) => member.id !== user?.id)?.avatar || currentPerson.avatar} alt="" /><i className={onlineUsers.length ? "is-online" : ""} /></span>
+            <span className="message-avatar"><img src={conversation.members.find((member) => member.id !== user?.id)?.avatar || DEFAULT_AVATAR} alt="" /><i className={onlineUsers.length ? "is-online" : ""} /></span>
             <span><strong>{conversationTitle}</strong><small>{conversation.lastMessage}</small></span><time>{timeAgo(conversation.updatedAt)}</time>
           </button>;
         })}
         {user && !conversations.length && <p className="muted-copy message-signin">No conversations yet. Start one with a friend.</p>}
       </div>
       {selected ? <div className="conversation">
-        <div className="conversation-header"><img src={selected.members.find((member) => member.id !== user?.id)?.avatar || currentPerson.avatar} alt="" /><div><strong>{title}</strong><span>{onlineUsers.length > 1 ? "Friend is online" : selected.is_group ? `${selected.members.length} members` : "Private conversation"}</span></div><button aria-label="Conversation options"><MoreHorizontal size={20} /></button></div>
+        <div className="conversation-header"><img src={selected.members.find((member) => member.id !== user?.id)?.avatar || DEFAULT_AVATAR} alt="" /><div><strong>{title}</strong><span>{onlineUsers.length > 1 ? "Friend is online" : selected.is_group ? `${selected.members.length} members` : "Private conversation"}</span></div><button aria-label="Conversation options"><MoreHorizontal size={20} /></button></div>
         <div className="conversation-body">{messages.length === 0 && <p className="message-empty">Say hello and start this conversation.</p>}{messages.map((item) => {
           const author = toPerson(item.profiles, item.sender_id);
           return <div className={`message-line ${item.sender_id === user?.id ? "message-line-own" : ""}`} key={item.id}>{selected.is_group && item.sender_id !== user?.id && <small>{author.name}</small>}<div className={`chat-bubble ${item.sender_id === user?.id ? "sent" : "received"}`}>{item.content}</div><time>{timeAgo(item.created_at)}</time></div>;
