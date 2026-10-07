@@ -3,6 +3,7 @@
 import {
   Bell,
   Bookmark,
+  Camera,
   Check,
   ChevronDown,
   ChevronRight,
@@ -11,6 +12,7 @@ import {
   Globe2,
   Heart,
   Home,
+  Images,
   Image as ImageIcon,
   Menu,
   MessageCircle,
@@ -29,14 +31,14 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Comment, DEFAULT_AVATAR, Person, Post, ReactionType } from "@/lib/data";
 import { getSupabase } from "@/lib/supabase/client";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 
-type PageKey = "feed" | "friends" | "messages" | "saved" | "settings";
+type PageKey = "feed" | "profile" | "friends" | "messages" | "saved" | "settings";
 type AuthMode = "signin" | "signup";
-type ProfileRow = { id: string; display_name: string; username: string | null; avatar_url: string | null; bio?: string; cover_url?: string | null; is_private?: boolean };
+type ProfileRow = { id: string; display_name: string; username: string | null; avatar_url: string | null; bio?: string; cover_url?: string | null; is_private?: boolean; created_at?: string };
 type FriendshipRow = { id: string; requester_id: string; addressee_id: string; status: "pending" | "accepted" | "declined" | "blocked"; created_at: string };
 type NotificationRow = { id: string; kind: string; entity_id: string | null; read_at: string | null; created_at: string; profiles: ProfileRow | ProfileRow[] | null };
 type FeedRow = {
@@ -66,8 +68,29 @@ function toPerson(relation: ProfileRow | ProfileRow[] | null, fallbackId: string
   };
 }
 
+function toPost(row: FeedRow, viewerId: string): Post {
+  const comments: Comment[] = (row.comments || []).map((comment) => ({
+    id: comment.id,
+    text: comment.content,
+    time: timeAgo(comment.created_at),
+    author: toPerson(comment.profiles, comment.author_id),
+  }));
+  return {
+    id: row.id,
+    content: row.content,
+    image: row.image_url || undefined,
+    author: toPerson(row.profiles, row.author_id),
+    time: timeAgo(row.created_at),
+    likes: row.likes?.length || 0,
+    liked: (row.likes || []).some((like) => like.user_id === viewerId),
+    reaction: (row.likes || []).find((like) => like.user_id === viewerId)?.reaction,
+    comments,
+  };
+}
+
 const pageLabels: Record<PageKey, string> = {
   feed: "Your feed",
+  profile: "Your profile",
   friends: "Find your people",
   messages: "Messages",
   saved: "Saved moments",
@@ -83,6 +106,13 @@ function timeAgo(value: string) {
 
 export default function SocialApp() {
   const [posts, setPosts] = useState<Post[]>([]);
+  const [profilePosts, setProfilePosts] = useState<Post[]>([]);
+  const [profilePostCount, setProfilePostCount] = useState(0);
+  const [profilePostsLoading, setProfilePostsLoading] = useState(false);
+  const [profilePostsLoadingMore, setProfilePostsLoadingMore] = useState(false);
+  const profilePostsOffset = useRef(0);
+  const activeUserId = useRef<string | null>(null);
+  const [profileTab, setProfileTab] = useState<"posts" | "about" | "photos">("posts");
   const [page, setPage] = useState<PageKey>("feed");
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
@@ -146,28 +176,44 @@ export default function SocialApp() {
       return;
     }
 
-    const mapped: Post[] = ((data || []) as FeedRow[]).map((row) => {
-      const comments: Comment[] = (row.comments || []).map((comment) => ({
-        id: comment.id,
-        text: comment.content,
-        time: timeAgo(comment.created_at),
-        author: toPerson(comment.profiles, comment.author_id),
-      }));
-      return {
-        id: row.id,
-        content: row.content,
-        image: row.image_url || undefined,
-        author: toPerson(row.profiles, row.author_id),
-        time: timeAgo(row.created_at),
-        likes: row.likes?.length || 0,
-        liked: (row.likes || []).some((like) => like.user_id === user.id),
-        reaction: (row.likes || []).find((like) => like.user_id === user.id)?.reaction,
-        comments,
-      };
-    });
-    setPosts(mapped);
+    setPosts(((data || []) as FeedRow[]).map((row) => toPost(row, user.id)));
     setDatabaseReady(true);
   }, [user]);
+
+  const loadProfilePosts = useCallback(async (append = false) => {
+    if (!supabase || !user) {
+      setProfilePosts([]);
+      setProfilePostCount(0);
+      profilePostsOffset.current = 0;
+      setProfilePostsLoading(false);
+      setProfilePostsLoadingMore(false);
+      return;
+    }
+    const from = append ? profilePostsOffset.current : 0;
+    if (append) setProfilePostsLoadingMore(true);
+    else setProfilePostsLoading(true);
+    const { data, count, error: queryError } = await supabase
+      .from("posts")
+      .select("id, content, image_url, created_at, author_id, likes(user_id, reaction), comments(id, content, created_at, author_id, profiles!comments_author_id_fkey(id, display_name, username, avatar_url)), profiles!posts_author_id_fkey(id, display_name, username, avatar_url)", { count: "exact" })
+      .eq("author_id", user.id)
+      .order("created_at", { ascending: false })
+      .range(from, from + 29);
+    if (queryError) {
+      if (activeUserId.current !== user.id) return;
+      setError(`Could not load your profile posts: ${queryError.message}`);
+      setProfilePostsLoading(false);
+      setProfilePostsLoadingMore(false);
+      return;
+    }
+    if (activeUserId.current !== user.id) return;
+    const mapped = ((data || []) as FeedRow[]).map((row) => toPost(row, user.id));
+    if (append) setProfilePosts((current) => [...current, ...mapped]);
+    else setProfilePosts(mapped);
+    profilePostsOffset.current = from + mapped.length;
+    setProfilePostCount(count || 0);
+    setProfilePostsLoading(false);
+    setProfilePostsLoadingMore(false);
+  }, [supabase, user]);
 
   useEffect(() => {
     if (!supabase) {
@@ -178,10 +224,16 @@ export default function SocialApp() {
     const applySession = (session: Session | null) => {
       if (!alive) return;
       const sessionUser = session?.user;
+      activeUserId.current = sessionUser?.id || null;
       if (!sessionUser) {
         setDatabaseReady(false);
         setProfile(null);
         setPosts([]);
+        setProfilePosts([]);
+        setProfilePostCount(0);
+        profilePostsOffset.current = 0;
+        setProfilePostsLoading(false);
+        setProfilePostsLoadingMore(false);
         setFriendships([]);
         setSuggestedProfiles([]);
         setNotifications([]);
@@ -220,6 +272,10 @@ export default function SocialApp() {
   }, [loadPosts]);
 
   useEffect(() => {
+    if (page === "profile") void loadProfilePosts();
+  }, [loadProfilePosts, page]);
+
+  useEffect(() => {
     if (!supabase || !user) {
       setIsPrivate(false);
       return;
@@ -227,7 +283,7 @@ export default function SocialApp() {
     let alive = true;
     supabase
       .from("profiles")
-      .select("id, display_name, username, avatar_url, bio, cover_url, is_private")
+      .select("id, display_name, username, avatar_url, bio, cover_url, is_private, created_at")
       .eq("id", user.id)
       .maybeSingle()
       .then(({ data, error: profileError }) => {
@@ -406,16 +462,25 @@ export default function SocialApp() {
     if (!supabase || !user) return;
     const channel = supabase
       .channel("mahinbook-feed")
-      .on("postgres_changes", { event: "*", schema: "public", table: "posts" }, () => void loadPosts())
-      .on("postgres_changes", { event: "*", schema: "public", table: "likes" }, () => void loadPosts())
-      .on("postgres_changes", { event: "*", schema: "public", table: "comments" }, () => void loadPosts())
+      .on("postgres_changes", { event: "*", schema: "public", table: "posts" }, () => {
+        void loadPosts();
+        if (page === "profile") void loadProfilePosts();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "likes" }, () => {
+        void loadPosts();
+        if (page === "profile") void loadProfilePosts();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "comments" }, () => {
+        void loadPosts();
+        if (page === "profile") void loadProfilePosts();
+      })
       .on("postgres_changes", { event: "*", schema: "public", table: "friendships" }, () => void loadFriendships())
       .on("postgres_changes", { event: "*", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` }, () => void loadNotifications())
       .subscribe();
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [loadFriendships, loadNotifications, loadPosts, supabase, user]);
+  }, [loadFriendships, loadNotifications, loadPosts, loadProfilePosts, page, supabase, user]);
 
   const visiblePosts = useMemo(() => {
     const filtered = page === "saved" ? posts.filter((post) => savedPosts.includes(post.id)) : posts;
@@ -428,6 +493,33 @@ export default function SocialApp() {
         post.author.handle.toLowerCase().includes(normalized),
     );
   }, [page, posts, savedPosts, search]);
+
+  function renderPostCard(post: Post) {
+    return (
+      <PostCard
+        key={post.id}
+        post={post}
+        currentUser={displayPerson}
+        expanded={expandedComments.includes(post.id)}
+        commentDraft={commentDrafts[post.id] || ""}
+        saved={savedPosts.includes(post.id)}
+        onReact={(reaction) => void toggleReaction(post, reaction)}
+        onCommentDraft={(value) => setCommentDrafts((items) => ({ ...items, [post.id]: value }))}
+        onSubmitComment={(event) => void submitComment(event, post)}
+        onToggleComments={() => setExpandedComments((items) => items.includes(post.id) ? items.filter((id) => id !== post.id) : [...items, post.id])}
+        onSave={() => setSavedPosts((items) => items.includes(post.id) ? items.filter((id) => id !== post.id) : [...items, post.id])}
+        onMore={() => showNotice("More post options are coming soon.")}
+        canManage={post.author.id === user?.id}
+        onEdit={() => { setEditPost(post); setEditPostText(post.content); }}
+        onDelete={() => void deletePost(post)}
+        onDeleteComment={(commentId) => void deleteComment(commentId)}
+        onShare={() => {
+          if (navigator.clipboard) void navigator.clipboard.writeText(window.location.href);
+          showNotice("Link copied — share the good.");
+        }}
+      />
+    );
+  }
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -495,6 +587,7 @@ export default function SocialApp() {
       }
     }
     setIsPrivate(nextValue);
+    setProfile((current) => current ? { ...current, is_private: nextValue } : current);
     showNotice(nextValue ? "Your profile is now private." : "Your profile is now public.");
   }
 
@@ -607,6 +700,7 @@ export default function SocialApp() {
         return;
       }
       await loadPosts();
+      if (page === "profile") await loadProfilePosts();
       return;
     }
     setPosts((items) =>
@@ -638,6 +732,7 @@ export default function SocialApp() {
         return;
       }
       await loadPosts();
+      if (page === "profile") await loadProfilePosts();
     } else {
       const comment: Comment = {
         id: `comment-${Date.now()}`,
@@ -659,6 +754,7 @@ export default function SocialApp() {
       return;
     }
     await loadPosts();
+    if (page === "profile") await loadProfilePosts();
   }
 
   async function savePostEdit(event: FormEvent<HTMLFormElement>) {
@@ -671,6 +767,7 @@ export default function SocialApp() {
     }
     setEditPost(null);
     await loadPosts();
+    if (page === "profile") await loadProfilePosts();
     showNotice("Your post has been updated.");
   }
 
@@ -682,6 +779,7 @@ export default function SocialApp() {
       return;
     }
     await loadPosts();
+    if (page === "profile") await loadProfilePosts();
     showNotice("Post deleted.");
   }
 
@@ -722,7 +820,13 @@ export default function SocialApp() {
     setPage(next);
     setMobileMenuOpen(false);
     setError("");
+    if (next === "profile") window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#profile`);
+    else if (window.location.hash === "#profile") window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
   }
+
+  useEffect(() => {
+    if (authReady && user && window.location.hash === "#profile") setPage("profile");
+  }, [authReady, user]);
 
   if (!authReady) {
     return <main className="auth-gate"><p role="status">Restoring your session…</p></main>;
@@ -781,7 +885,7 @@ export default function SocialApp() {
               }}><Bell size={19} />{notifications.some((item) => !item.read_at) && <span className="notification-dot" />}</button>
               {notificationsOpen && <NotificationsPanel notifications={notifications} onClose={() => setNotificationsOpen(false)} onRefresh={() => void loadNotifications()} />}
             </div>
-          <button className="account-chip" onClick={() => navTo("settings")} title="Open settings">
+          <button className="account-chip" onClick={() => navTo("profile")} title="Open your profile">
             <img src={displayPerson.avatar} alt="" />
             <span>{displayPerson.name.split(" ")[0]}</span>
             <ChevronDown size={15} />
@@ -803,9 +907,11 @@ export default function SocialApp() {
               <i />
               <div><strong>{posts.filter((item) => item.author.id === user?.id).length}</strong><span>moments</span></div>
             </div>
+            <button className="profile-view-link" onClick={() => navTo("profile")}>View your profile <ChevronRight size={14} /></button>
           </div>
           <nav className="main-nav" aria-label="Main navigation">
             <NavItem icon={<Home size={19} />} label="Home feed" active={page === "feed"} onClick={() => navTo("feed")} />
+            <NavItem icon={<UserRound size={19} />} label="My profile" active={page === "profile"} onClick={() => navTo("profile")} />
               <NavItem icon={<Users size={19} />} label="Friends" badge={(() => {
                 const incomingCount = friendships.filter((item) => item.status === "pending" && item.addressee_id === user?.id).length;
                 return incomingCount ? String(incomingCount) : undefined;
@@ -822,20 +928,39 @@ export default function SocialApp() {
         </aside>
 
         <section className="feed-column">
-          <div className="welcome-row">
+          {page !== "profile" && <div className="welcome-row">
             <div>
               <p className="eyebrow">YOUR COMMUNITY</p>
               <h1>{pageLabels[page]}<span className="title-sparkle">✳</span></h1>
               <p className="welcome-subtitle">{page === "feed" ? "Good things are happening around you." : getPageSubtitle(page)}</p>
             </div>
             <button className="outline-pill" onClick={() => showNotice("You’re seeing the latest moments.")}><Compass size={16} /> Explore</button>
-          </div>
+          </div>}
 
           {error && (
             <div className="error-banner" role="alert">
               <span>{error}</span>
               <button aria-label="Dismiss error" onClick={() => setError("")}><X size={16} /></button>
             </div>
+          )}
+
+          {page === "profile" && (
+            <ProfilePage
+              profile={profile}
+              person={displayPerson}
+              friendCount={friendships.filter((item) => item.status === "accepted").length}
+              postCount={profilePostCount}
+              posts={profilePosts}
+              loading={profilePostsLoading}
+              loadingMore={profilePostsLoadingMore}
+              hasMore={profilePosts.length < profilePostCount}
+              tab={profileTab}
+              onTab={setProfileTab}
+              onEdit={() => navTo("settings")}
+              onCreatePost={() => { navTo("feed"); setComposerOpen(true); }}
+              onLoadMore={() => void loadProfilePosts(true)}
+              renderPost={renderPostCard}
+            />
           )}
 
           {page === "feed" && (
@@ -882,30 +1007,7 @@ export default function SocialApp() {
               <div className="posts-list">
                 {supabase && user && !databaseReady ? (
                   <div className="empty-state"><span><Sparkles size={21} /></span><strong>Gathering your people’s moments</strong><p>Your Supabase feed is loading.</p></div>
-                ) : visiblePosts.length ? visiblePosts.map((post) => (
-                  <PostCard
-                    key={post.id}
-                    post={post}
-                    currentUser={displayPerson}
-                    expanded={expandedComments.includes(post.id)}
-                    commentDraft={commentDrafts[post.id] || ""}
-                    saved={savedPosts.includes(post.id)}
-                    onReact={(reaction) => void toggleReaction(post, reaction)}
-                    onCommentDraft={(value) => setCommentDrafts((items) => ({ ...items, [post.id]: value }))}
-                    onSubmitComment={(event) => void submitComment(event, post)}
-                    onToggleComments={() => setExpandedComments((items) => items.includes(post.id) ? items.filter((id) => id !== post.id) : [...items, post.id])}
-                    onSave={() => setSavedPosts((items) => items.includes(post.id) ? items.filter((id) => id !== post.id) : [...items, post.id])}
-                    onMore={() => showNotice("More post options are coming soon.")}
-                    canManage={post.author.id === user?.id}
-                    onEdit={() => { setEditPost(post); setEditPostText(post.content); }}
-                    onDelete={() => void deletePost(post)}
-                    onDeleteComment={(commentId) => void deleteComment(commentId)}
-                    onShare={() => {
-                      if (navigator.clipboard) void navigator.clipboard.writeText(window.location.href);
-                      showNotice("Link copied — share the good.");
-                    }}
-                  />
-                )) : <EmptyState title="No moments to show yet" text={search ? "Try another name or search for something different." : "Be the first to share a moment with your community."} />}
+                ) : visiblePosts.length ? visiblePosts.map(renderPostCard) : <EmptyState title="No moments to show yet" text={search ? "Try another name or search for something different." : "Be the first to share a moment with your community."} />}
               </div>
             </>
           )}
@@ -916,30 +1018,7 @@ export default function SocialApp() {
             <>
               <div className="saved-intro"><Bookmark size={18} /><span>Your saved moments are just for you.</span></div>
               <div className="posts-list">
-                {visiblePosts.length ? visiblePosts.map((post) => (
-                  <PostCard
-                    key={post.id}
-                    post={post}
-                    currentUser={displayPerson}
-                    expanded={expandedComments.includes(post.id)}
-                    commentDraft={commentDrafts[post.id] || ""}
-                    saved={savedPosts.includes(post.id)}
-                    onReact={(reaction) => void toggleReaction(post, reaction)}
-                    onCommentDraft={(value) => setCommentDrafts((items) => ({ ...items, [post.id]: value }))}
-                    onSubmitComment={(event) => void submitComment(event, post)}
-                    onToggleComments={() => setExpandedComments((items) => items.includes(post.id) ? items.filter((id) => id !== post.id) : [...items, post.id])}
-                    onSave={() => setSavedPosts((items) => items.includes(post.id) ? items.filter((id) => id !== post.id) : [...items, post.id])}
-                    onMore={() => showNotice("More post options are coming soon.")}
-                    canManage={post.author.id === user?.id}
-                    onEdit={() => { setEditPost(post); setEditPostText(post.content); }}
-                    onDelete={() => void deletePost(post)}
-                    onDeleteComment={(commentId) => void deleteComment(commentId)}
-                    onShare={() => {
-                      if (navigator.clipboard) void navigator.clipboard.writeText(window.location.href);
-                      showNotice("Link copied — share the good.");
-                    }}
-                  />
-                )) : <EmptyState title="Save a moment for later" text="Tap the bookmark on any post and it’ll be waiting here." />}
+                {visiblePosts.length ? visiblePosts.map(renderPostCard) : <EmptyState title="Save a moment for later" text="Tap the bookmark on any post and it’ll be waiting here." />}
               </div>
             </>
           )}
@@ -976,6 +1055,86 @@ export default function SocialApp() {
         </form>
       </div>}
     </main>
+  );
+}
+
+function ProfilePage({ profile, person, friendCount, postCount, posts, loading, loadingMore, hasMore, tab, onTab, onEdit, onCreatePost, onLoadMore, renderPost }: {
+  profile: ProfileRow | null;
+  person: Person;
+  friendCount: number;
+  postCount: number;
+  posts: Post[];
+  loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
+  tab: "posts" | "about" | "photos";
+  onTab: (tab: "posts" | "about" | "photos") => void;
+  onEdit: () => void;
+  onCreatePost: () => void;
+  onLoadMore: () => void;
+  renderPost: (post: Post) => React.ReactNode;
+}) {
+  const photos = posts.filter((post) => post.image);
+  const completionFields = [profile?.display_name, profile?.username, profile?.bio, profile?.avatar_url, profile?.cover_url];
+  const completion = Math.round((completionFields.filter(Boolean).length / completionFields.length) * 100);
+  const joined = profile?.created_at
+    ? new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(new Date(profile.created_at))
+    : null;
+
+  return (
+    <div className="profile-page">
+      <section className="profile-hero-card">
+        <div className="profile-hero-cover" style={profile?.cover_url ? { backgroundImage: `linear-gradient(100deg, rgba(20,49,38,.16), rgba(20,49,38,.02)), url("${profile.cover_url}")` } : undefined}>
+          {!profile?.cover_url && <><span className="profile-cover-orb profile-cover-orb-one" /><span className="profile-cover-orb profile-cover-orb-two" /><span className="profile-cover-wordmark">MAHINBOOK <i>·</i> YOUR SPACE</span></>}
+          <button className="profile-cover-edit" onClick={onEdit}><Camera size={15} /> Customize cover</button>
+        </div>
+        <div className="profile-identity">
+          <img className="profile-hero-avatar" src={person.avatar} alt={`${person.name} profile`} />
+          <div className="profile-identity-copy">
+            <div className="profile-name-line"><h1>{person.name}</h1>{profile?.is_private && <span className="profile-private-tag">Private</span>}</div>
+            <p className="profile-handle">@{person.handle}</p>
+            <p className="profile-bio">{profile?.bio?.trim() || "A little space for your story. Add a bio so people can get to know you."}</p>
+          </div>
+          <div className="profile-actions">
+            <button className="profile-edit-button" onClick={onEdit}><Pencil size={15} /> Edit profile</button>
+          </div>
+        </div>
+        <div className="profile-stat-row">
+          <div><strong>{friendCount}</strong><span>Friends</span></div>
+          <i />
+          <div><strong>{postCount}</strong><span>Moments</span></div>
+          <span className="profile-stat-note">Your community, your pace</span>
+        </div>
+        <nav className="profile-tabs" aria-label="Profile sections">
+          <button className={tab === "posts" ? "profile-tab-active" : ""} aria-pressed={tab === "posts"} onClick={() => onTab("posts")}>Moments <span>{postCount}</span></button>
+          <button className={tab === "about" ? "profile-tab-active" : ""} aria-pressed={tab === "about"} onClick={() => onTab("about")}>About</button>
+          <button className={tab === "photos" ? "profile-tab-active" : ""} aria-pressed={tab === "photos"} onClick={() => onTab("photos")}><Images size={15} /> Photos</button>
+        </nav>
+      </section>
+
+      <div className="profile-layout">
+        <section className="profile-main-column">
+          {tab === "posts" && <>
+            <div className="profile-section-heading"><div><span className="profile-section-kicker">YOUR STORY</span><h2>Latest moments</h2></div><button className="share-button" onClick={onCreatePost}><span>+</span> Create a moment</button></div>
+            {loading ? <div className="profile-loading" role="status">Loading your moments…</div> : posts.length ? <><div className="posts-list">{posts.map(renderPost)}</div>{hasMore && <button className="profile-load-more" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? "Loading older moments…" : "Load older moments"} <ChevronDown size={15} /></button>}</> : <div className="profile-empty"><span className="profile-empty-icon"><Sparkles size={21} /></span><h3>Your story starts here</h3><p>Share a moment, a thought, or a photo with your community.</p><button className="share-button" onClick={onCreatePost}>Create your first moment <ChevronRight size={15} /></button></div>}
+          </>}
+          {tab === "about" && <section className="profile-detail-card"><span className="profile-section-kicker">THE PERSON BEHIND THE POSTS</span><h2>About {person.name.split(" ")[0]}</h2><p className="profile-about-bio">{profile?.bio?.trim() || "This profile is still getting its introduction. Add a few words about yourself in Edit profile."}</p><div className="profile-detail-list"><div><span className="profile-detail-icon"><UserRound size={16} /></span><span><small>Username</small><strong>@{person.handle}</strong></span></div><div><span className="profile-detail-icon"><Users size={16} /></span><span><small>Friends</small><strong>{friendCount} {friendCount === 1 ? "friend" : "friends"}</strong></span></div><div><span className="profile-detail-icon"><Heart size={16} /></span><span><small>Sharing with</small><strong>{profile?.is_private ? "Friends" : "The community"}</strong></span></div>{joined && <div><span className="profile-detail-icon"><Sparkles size={16} /></span><span><small>Here since</small><strong>{joined}</strong></span></div>}</div><button className="profile-secondary-action" onClick={onEdit}>Complete your profile <ChevronRight size={15} /></button></section>}
+          {tab === "photos" && <section className="profile-photos-panel"><div className="profile-section-heading"><div><span className="profile-section-kicker">MOMENTS IN PICTURES</span><h2>Your photos</h2></div></div>{loading ? <div className="profile-loading" role="status">Loading your photos…</div> : photos.length ? <><div className="profile-photo-grid">{photos.map((post) => <a key={post.id} href={post.image} target="_blank" rel="noreferrer" className="profile-photo-tile"><img src={post.image} alt={post.content || "Photo shared on MahinBook"} /><span>{post.content || "Photo moment"}</span></a>)}</div>{hasMore && <button className="profile-load-more" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? "Loading older moments…" : "Load older moments"} <ChevronDown size={15} /></button>}</> : hasMore ? <div className="profile-empty profile-empty-compact"><span className="profile-empty-icon"><Images size={21} /></span><h3>Looking further back</h3><p>There are older moments to check for photos.</p><button className="profile-secondary-action" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load older moments"} <ChevronRight size={15} /></button></div> : <div className="profile-empty profile-empty-compact"><span className="profile-empty-icon"><Images size={21} /></span><h3>No photos yet</h3><p>Photos you share with your moments will appear here.</p><button className="profile-secondary-action" onClick={onCreatePost}>Share a photo <ChevronRight size={15} /></button></div>}</section>}
+        </section>
+
+        <aside className="profile-info-column">
+          <section className="profile-info-card">
+            <div className="profile-info-heading"><span className="profile-info-icon"><UserRound size={16} /></span><h2>About you</h2><button onClick={onEdit} aria-label="Edit profile"><Pencil size={14} /></button></div>
+            <p>{profile?.bio?.trim() || "Your bio is a small introduction to the people you meet here."}</p>
+            <div className="profile-info-meta"><span className="profile-detail-icon"><Users size={15} /></span><span><strong>{friendCount}</strong> {friendCount === 1 ? "friend" : "friends"}</span></div>
+            {joined && <div className="profile-info-meta"><span className="profile-detail-icon"><Sparkles size={15} /></span><span>Joined {joined}</span></div>}
+            <button className="profile-secondary-action" onClick={() => onTab("about")}>See full introduction <ChevronRight size={15} /></button>
+          </section>
+          {completion < 100 && <section className="profile-completion-card"><span className="profile-section-kicker">MAKE IT YOURS</span><div className="profile-completion-title"><strong>Profile strength</strong><span>{completion}%</span></div><div className="profile-progress"><span style={{ width: `${completion}%` }} /></div><p>{completion < 60 ? "Add a photo and a few details so your community can recognize you." : "A cover photo or a few more details will finish your profile."}</p><button onClick={onEdit}>Add profile details <ChevronRight size={14} /></button></section>}
+          <div className="profile-privacy-note"><span><Heart size={15} /></span><p>Your profile is {profile?.is_private ? "private to friends" : "visible to your community"}. You can change this anytime in settings.</p></div>
+        </aside>
+      </div>
+    </div>
   );
 }
 
