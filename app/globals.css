@@ -226,6 +226,8 @@ h1, h2, p { margin-top: 0; }
 .search-person { display: flex; align-items: center; gap: 9px; padding: 7px 0; border-top: 1px solid #f1f3f2; }
 .search-person > img { width: 34px; height: 34px; border-radius: 12px; object-fit: cover; }
 .search-person > span { display: flex; flex: 1; flex-direction: column; gap: 2px; }
+.search-profile-open { display: flex; flex: 1; flex-direction: column; gap: 2px; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.search-profile-open:hover strong { color: var(--green); }
 .search-person strong { font-size: 10px; }
 .search-person small { color: #98a39d; font-size: 9px; }
 .search-person button { padding: 7px 9px; border: 0; border-radius: 8px; background: #eaf3ee; color: var(--green); font-size: 9px; font-weight: 700; cursor: pointer; }
@@ -470,6 +472,36 @@ h1, h2, p { margin-top: 0; }
 .profile-photo-tile:hover img { transform: scale(1.04); }
 .profile-photo-tile > span { position: absolute; right: 0; bottom: 0; left: 0; overflow: hidden; padding: 18px 8px 7px; background: linear-gradient(transparent, rgba(18,35,27,.65)); color: white; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Friend profile and messaging controls */
+.friendship-person { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.friendship-person strong { font-size: 10px; }
+.friendship-person small { color: #97a19b; font-size: 9px; }
+.friendship-person:hover strong, .friend-card-profile:hover strong { color: var(--green); }
+.friend-card-profile { display: grid; justify-items: center; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.profile-back { margin: 0 0 12px; padding: 8px 10px; border: 1px solid #e5ebe7; border-radius: 9px; background: white; color: var(--green); font-size: 10px; font-weight: 700; cursor: pointer; }
+.friend-profile-page { display: grid; gap: 13px; }
+.friend-profile-page .profile-hero-cover { height: 150px; background-position: center; background-size: cover; }
+.friend-profile-page .profile-identity { padding-bottom: 15px; }
+.friend-profile-page .profile-identity-copy { flex: 1; }
+.friend-profile-posts { margin-top: 2px; }
+.profile-locked { padding: 18px; }
+.profile-locked h2 { margin: 0 0 5px; font-size: 15px; }
+.profile-locked p { color: #88958e; font-size: 10px; }
+.settings-section { margin-top: 17px; }
+.settings-section h3 { margin: 0; padding: 0 0 7px; color: #7e8b83; font-size: 9px; letter-spacing: .7px; text-transform: uppercase; }
+.new-group-button { width: auto !important; padding: 5px 7px !important; font-size: 8px !important; font-weight: 700; line-height: 1.2 !important; }
+.conversation-header { position: relative; }
+.chat-control-menu { position: absolute; z-index: 8; top: 48px; right: 10px; display: grid; min-width: 135px; padding: 5px; border: 1px solid #e8eeea; border-radius: 10px; background: white; box-shadow: 0 9px 25px rgba(25,48,39,.13); }
+.chat-control-menu button { padding: 8px 9px; border: 0; border-radius: 7px; background: transparent; color: #5e6d64; text-align: left; font-size: 9px; cursor: pointer; }
+.chat-control-menu button:hover { background: #f2f6f3; color: var(--green); }
+.message-inline-actions { display: flex; gap: 5px; }
+.message-inline-actions button { padding: 2px 0; border: 0; background: transparent; color: #8a978f; font-size: 8px; cursor: pointer; }
+.message-inline-actions button:hover { color: var(--green); }
+.replying-to { position: absolute; top: -27px; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between; overflow: hidden; padding: 5px 8px; border-radius: 7px 7px 0 0; background: #eef5f0; color: #63796b; font-size: 8px; white-space: nowrap; text-overflow: ellipsis; }
+.replying-to button { display: grid; place-items: center; padding: 2px; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.message-compose { position: relative; }
+.message-list-heading .new-group-button { background: #eaf3ee; color: var(--green); }
+
 .mobile-scrim { display: none; }
 
 @media (max-width: 1120px) {
@@ -541,6 +573,7 @@ h1, h2, p { margin-top: 0; }
   .profile-tabs button { min-height: 44px; padding: 0 10px; }
   .profile-section-heading h2 { font-size: 14px; }
   .profile-photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .friend-profile-page .profile-identity { flex-wrap: wrap; }
 }
 @media (max-width: 390px) {
   .brand-word { font-size: 16px; }

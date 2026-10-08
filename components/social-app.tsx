@@ -34,9 +34,9 @@ import {
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Comment, DEFAULT_AVATAR, Person, Post, ReactionType } from "@/lib/data";
 import { getSupabase } from "@/lib/supabase/client";
-import type { Session, SupabaseClient } from "@supabase/supabase-js";
+import type { RealtimeChannel, Session, SupabaseClient } from "@supabase/supabase-js";
 
-type PageKey = "feed" | "profile" | "friends" | "messages" | "saved" | "settings";
+type PageKey = "feed" | "profile" | "member-profile" | "friends" | "messages" | "saved" | "settings";
 type AuthMode = "signin" | "signup";
 type ProfileRow = { id: string; display_name: string; username: string | null; avatar_url: string | null; bio?: string; cover_url?: string | null; is_private?: boolean; created_at?: string };
 type FriendshipRow = { id: string; requester_id: string; addressee_id: string; status: "pending" | "accepted" | "declined" | "blocked"; created_at: string };
@@ -91,6 +91,7 @@ function toPost(row: FeedRow, viewerId: string): Post {
 const pageLabels: Record<PageKey, string> = {
   feed: "Your feed",
   profile: "Your profile",
+  "member-profile": "Friend profile",
   friends: "Find your people",
   messages: "Messages",
   saved: "Saved moments",
@@ -114,6 +115,8 @@ export default function SocialApp() {
   const activeUserId = useRef<string | null>(null);
   const [profileTab, setProfileTab] = useState<"posts" | "about" | "photos">("posts");
   const [page, setPage] = useState<PageKey>("feed");
+  const [profileTarget, setProfileTarget] = useState<string | null>(null);
+  const [pendingMessageUser, setPendingMessageUser] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
   const [postMedia, setPostMedia] = useState<File | null>(null);
@@ -126,6 +129,7 @@ export default function SocialApp() {
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [notifications, setNotifications] = useState<NotificationRow[]>([]);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [messageAlerts, setMessageAlerts] = useState(true);
   const [searchProfiles, setSearchProfiles] = useState<ProfileRow[]>([]);
   const [editPost, setEditPost] = useState<Post | null>(null);
   const [editPostText, setEditPostText] = useState("");
@@ -433,6 +437,10 @@ export default function SocialApp() {
   useEffect(() => {
     void loadNotifications();
   }, [loadNotifications]);
+
+  useEffect(() => {
+    setMessageAlerts(window.localStorage.getItem("mahinbook-message-alerts") !== "false");
+  }, []);
 
   useEffect(() => {
     if (!supabase || !user || search.trim().length < 2) {
@@ -878,12 +886,12 @@ export default function SocialApp() {
           <div className="top-actions">
             <button className="top-action" aria-label="Messages" onClick={() => navTo("messages")}><MessageCircle size={19} /><span className="notification-dot" /></button>
             <div className="notification-control">
-              <button className="top-action" aria-label={`Notifications${notifications.filter((item) => !item.read_at).length ? `, ${notifications.filter((item) => !item.read_at).length} unread` : ""}`} onClick={() => {
+              <button className="top-action" aria-label={`Notifications${notifications.filter((item) => !item.read_at && (messageAlerts || item.kind !== "message")).length ? `, ${notifications.filter((item) => !item.read_at && (messageAlerts || item.kind !== "message")).length} unread` : ""}`} onClick={() => {
                 if (!user) { setAuthMode("signin"); return; }
                 setNotificationsOpen((open) => !open);
                 void markNotificationsRead();
-              }}><Bell size={19} />{notifications.some((item) => !item.read_at) && <span className="notification-dot" />}</button>
-              {notificationsOpen && <NotificationsPanel notifications={notifications} onClose={() => setNotificationsOpen(false)} onRefresh={() => void loadNotifications()} />}
+              }}><Bell size={19} />{notifications.some((item) => !item.read_at && (messageAlerts || item.kind !== "message")) && <span className="notification-dot" />}</button>
+              {notificationsOpen && <NotificationsPanel notifications={notifications.filter((item) => messageAlerts || item.kind !== "message")} onClose={() => setNotificationsOpen(false)} onRefresh={() => void loadNotifications()} />}
             </div>
           <button className="account-chip" onClick={() => navTo("profile")} title="Open your profile">
             <img src={displayPerson.avatar} alt="" />
@@ -962,6 +970,7 @@ export default function SocialApp() {
               renderPost={renderPostCard}
             />
           )}
+          {page === "member-profile" && profileTarget && <FriendProfilePage supabase={supabase} userId={profileTarget} onMessage={() => { setPendingMessageUser(profileTarget); navTo("messages"); }} onBack={() => navTo("friends")} />}
 
           {page === "feed" && (
             <>
@@ -999,7 +1008,7 @@ export default function SocialApp() {
                   <div className="side-heading"><div><strong>People</strong><span>Matching profiles</span></div></div>
                   {searchProfiles.map((result) => {
                     const relation = friendships.find((friendship) => friendship.requester_id === result.id || friendship.addressee_id === result.id);
-                    return <div className="search-person" key={result.id}><img src={result.avatar_url || DEFAULT_AVATAR} alt="" /><span><strong>{result.display_name}</strong><small>@{result.username || "member"}</small></span>{relation?.status === "accepted" ? <small>Friends</small> : relation?.status === "pending" && relation.requester_id === user?.id ? <small>Request sent</small> : relation?.status === "pending" ? <><button onClick={() => void respondFriendRequest(relation.id, "accepted")}>Accept</button><button className="secondary" onClick={() => void respondFriendRequest(relation.id, "declined")}>Decline</button></> : relation?.status === "blocked" ? <small>Unavailable</small> : <button onClick={() => void sendFriendRequest(result.id)}>Add friend</button>}</div>;
+                    return <div className="search-person" key={result.id}><img src={result.avatar_url || DEFAULT_AVATAR} alt="" /><button className="search-profile-open" onClick={() => { setProfileTarget(result.id); navTo("member-profile"); }}><strong>{result.display_name}</strong><small>@{result.username || "member"}</small></button>{relation?.status === "accepted" ? <small>Friends</small> : relation?.status === "pending" && relation.requester_id === user?.id ? <small>Request sent</small> : relation?.status === "pending" ? <><button onClick={() => void respondFriendRequest(relation.id, "accepted")}>Accept</button><button className="secondary" onClick={() => void respondFriendRequest(relation.id, "declined")}>Decline</button></> : relation?.status === "blocked" ? <small>Unavailable</small> : <button onClick={() => void sendFriendRequest(result.id)}>Add friend</button>}</div>;
                   })}
                 </section>
               )}
@@ -1012,8 +1021,8 @@ export default function SocialApp() {
             </>
           )}
 
-          {page === "friends" && <FriendsPanel supabase={supabase} user={user} friendships={friendships} onReload={() => void loadFriendships()} onSend={sendFriendRequest} onRespond={respondFriendRequest} onBlock={blockUser} onUnblock={unblockUser} onSignIn={() => setAuthMode("signin")} />}
-          {page === "messages" && <MessagesPanel supabase={supabase} user={user} friendships={friendships} currentUser={displayPerson} onSignIn={() => setAuthMode("signin")} onError={setError} />}
+          {page === "friends" && <FriendsPanel supabase={supabase} user={user} friendships={friendships} onReload={() => void loadFriendships()} onSend={sendFriendRequest} onRespond={respondFriendRequest} onBlock={blockUser} onUnblock={unblockUser} onSignIn={() => setAuthMode("signin")} onViewProfile={(id) => { setProfileTarget(id); navTo("member-profile"); }} />}
+          {page === "messages" && <MessagesPanel supabase={supabase} user={user} friendships={friendships} currentUser={displayPerson} openWithUserId={pendingMessageUser} onOpenedUser={() => setPendingMessageUser(null)} onBlock={blockUser} onSignIn={() => setAuthMode("signin")} onError={setError} />}
           {page === "saved" && (
             <>
               <div className="saved-intro"><Bookmark size={18} /><span>Your saved moments are just for you.</span></div>
@@ -1022,7 +1031,7 @@ export default function SocialApp() {
               </div>
             </>
           )}
-          {page === "settings" && <SettingsPanel user={user} profile={profile} isConnected={isConnected} databaseReady={databaseReady} isPrivate={isPrivate} busy={busy} onSignIn={() => setAuthMode("signin")} onSignOut={() => void signOut()} onTogglePrivacy={() => void togglePrivacy()} onDeleteAccount={() => void deleteAccount()} onSaveProfile={saveProfile} />}
+          {page === "settings" && <SettingsPanel user={user} profile={profile} isConnected={isConnected} databaseReady={databaseReady} isPrivate={isPrivate} messageAlerts={messageAlerts} busy={busy} onToggleMessageAlerts={() => { const next = !messageAlerts; setMessageAlerts(next); window.localStorage.setItem("mahinbook-message-alerts", String(next)); }} onSignIn={() => setAuthMode("signin")} onSignOut={() => void signOut()} onTogglePrivacy={() => void togglePrivacy()} onDeleteAccount={() => void deleteAccount()} onSaveProfile={saveProfile} />}
 
           {page === "feed" && <div className="feed-end"><span /> You’re all caught up <span /></div>}
         </section>
@@ -1220,7 +1229,7 @@ function PostCard({
 }
 
 function FriendsPanel({
-  supabase, user, friendships, onReload, onSend, onRespond, onBlock, onUnblock, onSignIn,
+  supabase, user, friendships, onReload, onSend, onRespond, onBlock, onUnblock, onSignIn, onViewProfile,
 }: {
   supabase: SupabaseClient | null;
   user: { id: string } | null;
@@ -1231,6 +1240,7 @@ function FriendsPanel({
   onBlock: (profileId: string) => Promise<void>;
   onUnblock: (profileId: string) => Promise<void>;
   onSignIn: () => void;
+  onViewProfile: (profileId: string) => void;
 }) {
   const [suggestions, setSuggestions] = useState<ProfileRow[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1272,17 +1282,17 @@ function FriendsPanel({
       {user && <>
         {incoming.length > 0 && <section className="friend-section"><h3>Friend requests <span>{incoming.length}</span></h3>{incoming.map((request) => <FriendshipRowView key={request.id} row={request} userId={user.id} supabase={supabase} actions={<><button onClick={() => void action(() => onRespond(request.id, "accepted"))} disabled={busy}><Check size={14} /> Accept</button><button className="secondary" onClick={() => void action(() => onRespond(request.id, "declined"))} disabled={busy}>Decline</button></>} />)}</section>}
         {outgoing.length > 0 && <section className="friend-section"><h3>Sent requests <span>{outgoing.length}</span></h3>{outgoing.map((request) => <FriendshipRowView key={request.id} row={request} userId={user.id} supabase={supabase} actions={<span className="friend-state">Waiting for a reply</span>} />)}</section>}
-        <section className="friend-section"><h3>Your friends <span>{friends.length}</span></h3>        {friends.length ? friends.map((friendship) => <FriendshipRowView key={friendship.id} row={friendship} userId={user.id} supabase={supabase} actions={<button className="secondary" disabled={busy} onClick={() => void action(() => onBlock(friendship.requester_id === user.id ? friendship.addressee_id : friendship.requester_id))}>Block</button>} />) : <p className="muted-copy">Your friend list will show up here when requests are accepted.</p>}</section>
+        <section className="friend-section"><h3>Your friends <span>{friends.length}</span></h3>        {friends.length ? friends.map((friendship) => { const friendId = friendship.requester_id === user.id ? friendship.addressee_id : friendship.requester_id; return <FriendshipRowView key={friendship.id} row={friendship} userId={user.id} supabase={supabase} onViewProfile={() => onViewProfile(friendId)} actions={<button className="secondary" disabled={busy} onClick={() => void action(() => onBlock(friendId))}>Block</button>} />; }) : <p className="muted-copy">Your friend list will show up here when requests are accepted.</p>}</section>
         {blocked.length > 0 && <section className="friend-section"><h3>Blocked</h3>{blocked.map((row) => <FriendshipRowView key={row.id} row={row} userId={user.id} supabase={supabase} actions={<button className="secondary" disabled={busy} onClick={() => void action(() => onUnblock(row.requester_id === user.id ? row.addressee_id : row.requester_id))}>Unblock</button>} />)}</section>}
         <section className="friend-section"><h3>People you may know</h3><div className="friends-grid">
-          {suggestions.map((person) => <article className="friend-card" key={person.id}><img src={person.avatar_url || DEFAULT_AVATAR} alt="" /><strong>{person.display_name}</strong><span>@{person.username || "member"}</span><small>{person.bio || "New to your community"}</small><button disabled={busy} onClick={() => void action(() => onSend(person.id))}><Users size={15} /> Add friend</button></article>)}
+          {suggestions.map((person) => <article className="friend-card" key={person.id}><button className="friend-card-profile" onClick={() => onViewProfile(person.id)}><img src={person.avatar_url || DEFAULT_AVATAR} alt="" /><strong>{person.display_name}</strong><span>@{person.username || "member"}</span></button><small>{person.bio || "New to your community"}</small><button disabled={busy} onClick={() => void action(() => onSend(person.id))}><Users size={15} /> Add friend</button></article>)}
         </div>{!suggestions.length && <p className="muted-copy">No suggestions yet. Search for people using the bar above.</p>}</section>
       </>}
     </div>
   );
 }
 
-function FriendshipRowView({ row, userId, supabase, actions }: { row: FriendshipRow; userId: string; supabase: SupabaseClient | null; actions: React.ReactNode }) {
+function FriendshipRowView({ row, userId, supabase, actions, onViewProfile }: { row: FriendshipRow; userId: string; supabase: SupabaseClient | null; actions: React.ReactNode; onViewProfile?: () => void }) {
   const personId = row.requester_id === userId ? row.addressee_id : row.requester_id;
   const [person, setPerson] = useState<Person | null>(null);
   useEffect(() => {
@@ -1293,13 +1303,40 @@ function FriendshipRowView({ row, userId, supabase, actions }: { row: Friendship
     });
     return () => { alive = false; };
   }, [personId, supabase]);
-  return <div className="friendship-row"><img src={person?.avatar || DEFAULT_AVATAR} alt="" /><span><strong>{person?.name || "MahinBook member"}</strong><small>@{person?.handle || "member"}</small></span><div>{actions}</div></div>;
+  return <div className="friendship-row"><img src={person?.avatar || DEFAULT_AVATAR} alt="" /><button className="friendship-person" onClick={onViewProfile} disabled={!onViewProfile}><strong>{person?.name || "MahinBook member"}</strong><small>@{person?.handle || "member"}</small></button><div>{actions}</div></div>;
+}
+
+function FriendProfilePage({ supabase, userId, onMessage, onBack }: { supabase: SupabaseClient | null; userId: string; onMessage: () => void; onBack: () => void }) {
+  const [profile, setProfile] = useState<ProfileRow | null>(null);
+  const [posts, setPosts] = useState<FeedRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    if (!supabase) { setLoading(false); return; }
+    let alive = true;
+    async function load() {
+      setLoading(true);
+      const [profileResult, postResult] = await Promise.all([
+        supabase!.from("profiles").select("id, display_name, username, avatar_url, bio, cover_url, is_private, created_at").eq("id", userId).maybeSingle(),
+        supabase!.from("posts").select("id, content, image_url, created_at, author_id, likes(user_id, reaction), comments(id, content, created_at, author_id, profiles!comments_author_id_fkey(id, display_name, username, avatar_url)), profiles!posts_author_id_fkey(id, display_name, username, avatar_url)").eq("author_id", userId).order("created_at", { ascending: false }).limit(20),
+      ]);
+      if (!alive) return;
+      setProfile(profileResult.data as ProfileRow | null);
+      setPosts((postResult.data || []) as FeedRow[]);
+      setLoading(false);
+    }
+    void load();
+    return () => { alive = false; };
+  }, [supabase, userId]);
+  if (loading) return <div className="profile-loading" role="status">Loading your friend’s profile…</div>;
+  if (!profile) return <div className="panel-card profile-locked"><button className="profile-back" onClick={onBack}>← Back to friends</button><h2>This profile isn’t available</h2><p>This profile may be private or no longer available.</p></div>;
+  const person = toPerson(profile, userId);
+  return <div className="friend-profile-page"><button className="profile-back" onClick={onBack}>← Back to friends</button><section className="profile-hero-card"><div className="profile-hero-cover" style={profile.cover_url ? { backgroundImage: `linear-gradient(100deg, rgba(20,49,38,.16), rgba(20,49,38,.02)), url("${profile.cover_url}")` } : undefined} /><div className="profile-identity"><img className="profile-hero-avatar" src={person.avatar} alt="" /><div className="profile-identity-copy"><div className="profile-name-line"><h1>{person.name}</h1>{profile.is_private && <span className="profile-private-tag">Private</span>}</div><p className="profile-handle">@{person.handle}</p><p className="profile-bio">{profile.bio || "No bio yet."}</p></div><button className="profile-edit-button" onClick={onMessage}><MessageCircle size={15} /> Message</button></div><div className="profile-stat-row"><div><strong>{posts.length}</strong><span>Moments</span></div><span className="profile-stat-note">Friend profile</span></div></section><div className="posts-list friend-profile-posts">{posts.length ? posts.map((row) => <article className="post-card" key={row.id}><header className="post-header"><img className="post-avatar" src={person.avatar} alt="" /><div className="post-byline"><strong>{person.name}</strong><span>@{person.handle} · {timeAgo(row.created_at)}</span></div></header>{row.content && <p className="post-copy">{row.content}</p>}{row.image_url && <img className="post-image" src={row.image_url} alt="A moment shared by a friend" />}</article>) : <EmptyState title="No moments yet" text="When your friend shares moments, they’ll appear here." />}</div></div>;
 }
 
 type ConversationSummary = { id: string; title: string | null; is_group: boolean; members: Person[]; lastMessage: string; updatedAt: string };
 type MessageRow = { id: string; sender_id: string; content: string; created_at: string; profiles: ProfileRow | ProfileRow[] | null };
 
-function MessagesPanel({ supabase, user, friendships, currentUser, onSignIn, onError }: { supabase: SupabaseClient | null; user: { id: string } | null; friendships: FriendshipRow[]; currentUser: Person; onSignIn: () => void; onError: (message: string) => void }) {
+function MessagesPanel({ supabase, user, friendships, currentUser, openWithUserId, onOpenedUser, onBlock, onSignIn, onError }: { supabase: SupabaseClient | null; user: { id: string } | null; friendships: FriendshipRow[]; currentUser: Person; openWithUserId: string | null; onOpenedUser: () => void; onBlock: (profileId: string) => Promise<void>; onSignIn: () => void; onError: (message: string) => void }) {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<MessageRow[]>([]);
@@ -1309,6 +1346,13 @@ function MessagesPanel({ supabase, user, friendships, currentUser, onSignIn, onE
   const [selectedMembers, setSelectedMembers] = useState<string[]>([]);
   const [groupTitle, setGroupTitle] = useState("");
   const [busy, setBusy] = useState(false);
+  const [remoteTyping, setRemoteTyping] = useState(false);
+  const [replyTo, setReplyTo] = useState<MessageRow | null>(null);
+  const [chatMenuOpen, setChatMenuOpen] = useState(false);
+  const [mutedChats, setMutedChats] = useState<string[]>([]);
+  const typingChannel = useRef<RealtimeChannel | null>(null);
+  const typingTimeout = useRef<number | null>(null);
+  const localTyping = useRef(false);
 
   const loadConversations = useCallback(async () => {
     if (!supabase || !user) { setConversations([]); return; }
@@ -1331,6 +1375,10 @@ function MessagesPanel({ supabase, user, friendships, currentUser, onSignIn, onE
   }, [onError, supabase, user]);
 
   useEffect(() => { void loadConversations(); }, [loadConversations]);
+
+  useEffect(() => {
+    try { setMutedChats(JSON.parse(window.localStorage.getItem("mahinbook-muted-chats") || "[]") as string[]); } catch { setMutedChats([]); }
+  }, []);
 
   useEffect(() => {
     if (!supabase || !user) { setFriendProfiles([]); return; }
@@ -1364,12 +1412,17 @@ function MessagesPanel({ supabase, user, friendships, currentUser, onSignIn, onE
       void loadMessages();
       void loadConversations();
     });
-    channel.on("presence", { event: "sync" }, () => setOnlineUsers(Object.keys(channel.presenceState())));
+    typingChannel.current = channel;
+    channel.on("presence", { event: "sync" }, () => {
+      const state = channel.presenceState();
+      setOnlineUsers(Object.keys(state));
+      setRemoteTyping(Object.values(state).flat().some((entry: any) => entry.user_id !== user.id && entry.typing === true));
+    });
     channel.subscribe(async (status) => {
-      if (status === "SUBSCRIBED") await channel.track({ user_id: user.id, name: currentUser.name, online_at: new Date().toISOString() });
+      if (status === "SUBSCRIBED" && window.localStorage.getItem("mahinbook-show-online") !== "false") await channel.track({ user_id: user.id, name: currentUser.name, online_at: new Date().toISOString(), typing: false });
       else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") onError("Could not connect to this conversation’s live updates. Check the Realtime policies in the latest database migration.");
     });
-    return () => { void supabase.removeChannel(channel); };
+    return () => { typingChannel.current = null; setRemoteTyping(false); void supabase.removeChannel(channel); };
   }, [currentUser.name, loadConversations, loadMessages, onError, selectedId, supabase, user]);
 
   const [onlineUsers, setOnlineUsers] = useState<string[]>([]);
@@ -1391,22 +1444,67 @@ function MessagesPanel({ supabase, user, friendships, currentUser, onSignIn, onE
     setSelectedId(data as string);
   }
 
+  async function openDirectMessage(friend: Person) {
+    if (!supabase || !user) return;
+    const existing = conversations.find((conversation) => !conversation.is_group && conversation.members.length === 2 && conversation.members.some((member) => member.id === friend.id) && conversation.members.some((member) => member.id === user.id));
+    if (existing) { setSelectedId(existing.id); return; }
+    setBusy(true);
+    const { data, error: createError } = await supabase.rpc("create_conversation", { member_ids: [friend.id], conversation_title: null });
+    setBusy(false);
+    if (createError) { onError(`Could not open chat with ${friend.name}: ${createError.message}`); return; }
+    await loadConversations();
+    setSelectedId(data as string);
+  }
+
+  useEffect(() => {
+    if (!openWithUserId) return;
+    const friend = friendProfiles.find((person) => person.id === openWithUserId);
+    if (friend) { void openDirectMessage(friend).then(onOpenedUser); }
+  }, [openWithUserId, friendProfiles]);
+
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!message.trim() || !supabase || !user || !selectedId) return;
-    const content = message.trim();
+    const content = replyTo ? `↪ Reply to: “${replyTo.content.slice(0, 180)}”\n${message.trim()}` : message.trim();
     setMessage("");
+    setReplyTo(null);
+    if (typingTimeout.current) window.clearTimeout(typingTimeout.current);
+    localTyping.current = false;
     const { error: sendError } = await supabase.from("messages").insert({ conversation_id: selectedId, sender_id: user.id, content });
     if (sendError) { setMessage(content); onError(`Could not send message: ${sendError.message}`); return; }
     await loadMessages();
     await loadConversations();
+    if (window.localStorage.getItem("mahinbook-show-online") !== "false") void typingChannel.current?.track({ user_id: user.id, name: currentUser.name, online_at: new Date().toISOString(), typing: false });
+  }
+
+  function updateMessage(value: string) {
+    setMessage(value);
+    if (!typingChannel.current || !user || window.localStorage.getItem("mahinbook-show-online") === "false") return;
+    if (value.trim() && !localTyping.current) {
+      localTyping.current = true;
+      void typingChannel.current.track({ user_id: user.id, name: currentUser.name, online_at: new Date().toISOString(), typing: true });
+    }
+    if (typingTimeout.current) window.clearTimeout(typingTimeout.current);
+    typingTimeout.current = window.setTimeout(() => {
+      localTyping.current = false;
+      if (typingChannel.current && user) void typingChannel.current.track({ user_id: user.id, name: currentUser.name, online_at: new Date().toISOString(), typing: false });
+    }, value.trim() ? 1100 : 0);
+  }
+
+  function toggleMute() {
+    if (!selectedId) return;
+    const next = mutedChats.includes(selectedId) ? mutedChats.filter((id) => id !== selectedId) : [...mutedChats, selectedId];
+    setMutedChats(next);
+    window.localStorage.setItem("mahinbook-muted-chats", JSON.stringify(next));
+    setChatMenuOpen(false);
   }
 
   return (
     <div className="messages-card">
       <div className="message-list">
-        <div className="message-list-heading"><strong>Your conversations</strong><button aria-label="New message" onClick={() => user ? setNewConversationOpen(true) : onSignIn()}>+</button></div>
+        <div className="message-list-heading"><strong>Inbox</strong>{friendProfiles.length > 1 && <button className="new-group-button" onClick={() => user ? setNewConversationOpen(true) : onSignIn()}>New group</button>}</div>
         {!user && <p className="muted-copy message-signin">Sign in to message friends.</p>}
+        {user && friendProfiles.filter((friend) => !conversations.some((conversation) => !conversation.is_group && conversation.members.length === 2 && conversation.members.some((member) => member.id === friend.id))).map((friend) => <button className="message-person" key={`friend-${friend.id}`} onClick={() => void openDirectMessage(friend)} disabled={busy}><span className="message-avatar"><img src={friend.avatar} alt="" /><i /></span><span><strong>{friend.name}</strong><small>New friend · start chatting</small></span></button>)}
         {conversations.map((conversation) => {
           const conversationTitle = conversation.is_group ? conversation.title || conversation.members.map((member) => member.name).join(", ") : conversation.members.find((member) => member.id !== user?.id)?.name || "Conversation";
           return <button className={`message-person ${selectedId === conversation.id ? "message-person-active" : ""}`} key={conversation.id} onClick={() => setSelectedId(conversation.id)}>
@@ -1417,32 +1515,37 @@ function MessagesPanel({ supabase, user, friendships, currentUser, onSignIn, onE
         {user && !conversations.length && <p className="muted-copy message-signin">No conversations yet. Start one with a friend.</p>}
       </div>
       {selected ? <div className="conversation">
-        <div className="conversation-header"><img src={selected.members.find((member) => member.id !== user?.id)?.avatar || DEFAULT_AVATAR} alt="" /><div><strong>{title}</strong><span>{onlineUsers.length > 1 ? "Friend is online" : selected.is_group ? `${selected.members.length} members` : "Private conversation"}</span></div><button aria-label="Conversation options"><MoreHorizontal size={20} /></button></div>
+        <div className="conversation-header"><img src={selected.members.find((member) => member.id !== user?.id)?.avatar || DEFAULT_AVATAR} alt="" /><div><strong>{title}</strong><span>{remoteTyping ? "Typing…" : onlineUsers.length > 1 ? "Friend is online" : selected.is_group ? `${selected.members.length} members` : "Private conversation"}</span></div><button aria-label="Conversation options" onClick={() => setChatMenuOpen((open) => !open)}><MoreHorizontal size={20} /></button>{chatMenuOpen && <div className="chat-control-menu"><button onClick={toggleMute}>{mutedChats.includes(selected.id) ? "Unmute chat" : "Mute chat"}</button><button onClick={() => { setSelectedId(null); setChatMenuOpen(false); }}>Close conversation</button>{!selected.is_group && <button onClick={() => { const friendId = selected.members.find((member) => member.id !== user?.id)?.id; if (friendId) void onBlock(friendId); setChatMenuOpen(false); }}>Block person</button>}</div>}</div>
         <div className="conversation-body">{messages.length === 0 && <p className="message-empty">Say hello and start this conversation.</p>}{messages.map((item) => {
           const author = toPerson(item.profiles, item.sender_id);
-          return <div className={`message-line ${item.sender_id === user?.id ? "message-line-own" : ""}`} key={item.id}>{selected.is_group && item.sender_id !== user?.id && <small>{author.name}</small>}<div className={`chat-bubble ${item.sender_id === user?.id ? "sent" : "received"}`}>{item.content}</div><time>{timeAgo(item.created_at)}</time></div>;
+          return <div className={`message-line ${item.sender_id === user?.id ? "message-line-own" : ""}`} key={item.id}>{selected.is_group && item.sender_id !== user?.id && <small>{author.name}</small>}<div className={`chat-bubble ${item.sender_id === user?.id ? "sent" : "received"}`}>{item.content}</div><div className="message-inline-actions"><button onClick={() => setReplyTo(item)}>Reply</button><button onClick={() => { setMessage(`Forwarded message: “${item.content}”`); setReplyTo(null); }}>Forward</button></div><time>{timeAgo(item.created_at)}</time></div>;
         })}</div>
         <form className="message-compose" onSubmit={(event) => void sendMessage(event)}>
-          <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder={`Message ${title.split(",")[0]}...`} aria-label="Write a message" disabled={!user} />
+          {replyTo && <div className="replying-to">Replying to “{replyTo.content.slice(0, 72)}”<button type="button" aria-label="Cancel reply" onClick={() => setReplyTo(null)}><X size={13} /></button></div>}
+          <input value={message} onChange={(event) => updateMessage(event.target.value)} placeholder={`Message ${title.split(",")[0]}...`} aria-label="Write a message" disabled={!user} />
           <button disabled={!message.trim() || busy} aria-label="Send message"><Send size={16} /></button>
         </form>
       </div> : <div className="conversation conversation-no-selection"><MessageCircle size={26} /><strong>Your conversations live here</strong><span>Choose a friend to say hello.</span></div>}
-      {newConversationOpen && <div className="new-conversation-overlay"><form className="new-conversation" onSubmit={(event) => void createConversation(event)}><button type="button" className="modal-close" aria-label="Close" onClick={() => setNewConversationOpen(false)}><X size={17} /></button><h2>Start a conversation</h2><p>Choose one or more friends.</p>{friendProfiles.length > 1 && <input value={groupTitle} onChange={(event) => setGroupTitle(event.target.value)} placeholder="Group name (optional)" aria-label="Group name" />}{friendProfiles.map((friend) => <label key={friend.id}><input type="checkbox" checked={selectedMembers.includes(friend.id)} onChange={(event) => setSelectedMembers((ids) => event.target.checked ? [...ids, friend.id] : ids.filter((id) => id !== friend.id))} /><img src={friend.avatar} alt="" />{friend.name}</label>)}{!friendProfiles.length && <p className="muted-copy">Accept a friend request before starting a conversation.</p>}<button className="auth-submit" disabled={!selectedMembers.length || busy}>{busy ? "Starting…" : "Start chat"} <Send size={15} /></button></form></div>}
+      {newConversationOpen && <div className="new-conversation-overlay"><form className="new-conversation" onSubmit={(event) => void createConversation(event)}><button type="button" className="modal-close" aria-label="Close" onClick={() => setNewConversationOpen(false)}><X size={17} /></button><h2>Start a group chat</h2><p>Choose two or more friends.</p>{friendProfiles.length > 1 && <input value={groupTitle} onChange={(event) => setGroupTitle(event.target.value)} placeholder="Group name (optional)" aria-label="Group name" />}{friendProfiles.map((friend) => <label key={friend.id}><input type="checkbox" checked={selectedMembers.includes(friend.id)} onChange={(event) => setSelectedMembers((ids) => event.target.checked ? [...ids, friend.id] : ids.filter((id) => id !== friend.id))} /><img src={friend.avatar} alt="" />{friend.name}</label>)}{!friendProfiles.length && <p className="muted-copy">Accept a friend request before starting a conversation.</p>}<button className="auth-submit" disabled={selectedMembers.length < 2 || busy}>{busy ? "Starting…" : "Start group chat"} <Send size={15} /></button></form></div>}
     </div>
   );
 }
 
-function SettingsPanel({ user, profile, isConnected, databaseReady, isPrivate, busy, onSignIn, onSignOut, onTogglePrivacy, onDeleteAccount, onSaveProfile }: { user: { id: string; email?: string; name: string } | null; profile: ProfileRow | null; isConnected: boolean; databaseReady: boolean; isPrivate: boolean; busy: boolean; onSignIn: () => void; onSignOut: () => void; onTogglePrivacy: () => void; onDeleteAccount: () => void; onSaveProfile: (event: FormEvent<HTMLFormElement>, values: { display_name: string; username: string; bio: string }, avatar: File | null, cover: File | null) => void }) {
+function SettingsPanel({ user, profile, isConnected, databaseReady, isPrivate, messageAlerts, busy, onSignIn, onSignOut, onTogglePrivacy, onToggleMessageAlerts, onDeleteAccount, onSaveProfile }: { user: { id: string; email?: string; name: string } | null; profile: ProfileRow | null; isConnected: boolean; databaseReady: boolean; isPrivate: boolean; messageAlerts: boolean; busy: boolean; onSignIn: () => void; onSignOut: () => void; onTogglePrivacy: () => void; onToggleMessageAlerts: () => void; onDeleteAccount: () => void; onSaveProfile: (event: FormEvent<HTMLFormElement>, values: { display_name: string; username: string; bio: string }, avatar: File | null, cover: File | null) => void }) {
   const [name, setName] = useState(profile?.display_name || user?.name || "");
   const [username, setUsername] = useState(profile?.username || "");
   const [bio, setBio] = useState(profile?.bio || "");
   const [avatar, setAvatar] = useState<File | null>(null);
   const [cover, setCover] = useState<File | null>(null);
+  const [showOnline, setShowOnline] = useState(true);
   useEffect(() => {
     setName(profile?.display_name || user?.name || "");
     setUsername(profile?.username || "");
     setBio(profile?.bio || "");
   }, [profile, user]);
+  useEffect(() => {
+    setShowOnline(window.localStorage.getItem("mahinbook-show-online") !== "false");
+  }, []);
   return (
     <div className="panel-card settings-panel">
       <div className="panel-title-row"><div><span className="panel-icon"><Settings size={18} /></span><h2>Your profile &amp; settings</h2></div></div>
@@ -1456,7 +1559,8 @@ function SettingsPanel({ user, profile, isConnected, databaseReady, isPrivate, b
         <div className="profile-file-fields"><label>Profile photo<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={(event) => setAvatar(event.target.files?.[0] || null)} /></label><label>Cover photo<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={(event) => setCover(event.target.files?.[0] || null)} /></label></div>
         <button className="share-button" disabled={busy}>{busy ? "Saving…" : "Save profile"} <Check size={15} /></button>
       </form>}
-      <div className="settings-row"><span><strong>Privacy &amp; audience</strong><small>{isPrivate ? "Only friends can see your profile" : "Your profile is visible to the community"}</small></span><button className={`privacy-toggle ${isPrivate ? "privacy-toggle-on" : ""}`} aria-pressed={isPrivate} onClick={onTogglePrivacy}>{isPrivate ? "Private" : "Public"}</button></div>
+      <section className="settings-section"><h3>Privacy &amp; safety</h3><div className="settings-row"><span><strong>Lock your profile</strong><small>{isPrivate ? "Only accepted friends can see your profile and friends only posts" : "Anyone can view your public profile and public posts"}</small></span><button className={`privacy-toggle ${isPrivate ? "privacy-toggle-on" : ""}`} aria-pressed={isPrivate} onClick={onTogglePrivacy}>{isPrivate ? "Locked" : "Unlocked"}</button></div><div className="settings-row"><span><strong>Online status</strong><small>Let friends see when you’re active</small></span><button className={`privacy-toggle ${showOnline ? "" : "privacy-toggle-on"}`} aria-pressed={showOnline} onClick={() => { const next = !showOnline; setShowOnline(next); window.localStorage.setItem("mahinbook-show-online", String(next)); }}>{showOnline ? "On" : "Off"}</button></div></section>
+      <section className="settings-section"><h3>Notifications</h3><div className="settings-row"><span><strong>Message alerts</strong><small>Show message notifications in the notifications panel</small></span><button className={`privacy-toggle ${messageAlerts ? "" : "privacy-toggle-on"}`} aria-pressed={messageAlerts} onClick={onToggleMessageAlerts}>{messageAlerts ? "On" : "Off"}</button></div></section>
       <div className="settings-row"><span><strong>Delete your account</strong><small>Permanently remove your profile and community data</small></span><button className="delete-account-button" onClick={onDeleteAccount}>Delete account</button></div>
       <div className={`connection-status ${databaseReady ? "connected" : ""}`}><span />{databaseReady ? "Supabase connected · feed synced" : isConnected ? "Supabase ready · sign in to sync your feed" : "Preview mode — add Supabase keys to save changes"}</div>
     </div>
