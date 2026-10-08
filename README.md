@@ -6,7 +6,7 @@ MahinBook is a responsive social-network MVP built with Next.js App Router, Type
 
 1. Install dependencies with `npm install`.
 2. Copy `.env.example` to `.env.local` if needed and set `NEXT_PUBLIC_SUPABASE_ANON_KEY` to the project publishable key (or legacy anon key). The project URL is preconfigured in the example.
-3. In Supabase SQL Editor, apply `supabase/migrations/202610070001_initial_schema.sql` on a fresh project, followed by `supabase/migrations/202610070002_social_features.sql`. The initial migration is already installed on the connected project; the second migration must be applied before using reactions, friend workflows, notification triggers, secure realtime presence, or media uploads.
+3. In Supabase SQL Editor, apply `supabase/migrations/202610070001_initial_schema.sql` on a fresh project, followed by `supabase/migrations/202610070002_social_features.sql` and `supabase/migrations/20261008204434_message_delete_controls.sql`. The initial migration is already installed on the connected project. The second adds reactions, friend workflows, notification triggers, secure realtime presence, and media uploads; the third adds per-message and per-conversation deletion controls.
 4. Enable email auth and any desired OAuth providers in Supabase Auth. Set the local and production Site URL / redirect URLs in the Auth URL configuration.
 5. Start the app with `npm run dev`.
 

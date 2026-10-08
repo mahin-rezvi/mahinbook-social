@@ -494,9 +494,13 @@ h1, h2, p { margin-top: 0; }
 .chat-control-menu { position: absolute; z-index: 8; top: 48px; right: 10px; display: grid; min-width: 135px; padding: 5px; border: 1px solid #e8eeea; border-radius: 10px; background: white; box-shadow: 0 9px 25px rgba(25,48,39,.13); }
 .chat-control-menu button { padding: 8px 9px; border: 0; border-radius: 7px; background: transparent; color: #5e6d64; text-align: left; font-size: 9px; cursor: pointer; }
 .chat-control-menu button:hover { background: #f2f6f3; color: var(--green); }
-.message-inline-actions { display: flex; gap: 5px; }
-.message-inline-actions button { padding: 2px 0; border: 0; background: transparent; color: #8a978f; font-size: 8px; cursor: pointer; }
+.message-inline-actions { display: flex; flex-wrap: wrap; gap: 4px 8px; max-width: 100%; }
+.message-inline-actions button { padding: 3px 0; border: 0; background: transparent; color: #78877e; font-size: 9px; cursor: pointer; }
 .message-inline-actions button:hover { color: var(--green); }
+.message-inline-actions button:disabled { color: #a7b0aa; cursor: default; }
+.message-inline-actions button.message-unsend-action { color: #a6584d; }
+.message-inline-actions button.message-unsend-action:hover { color: #874638; }
+.chat-bubble-deleted { color: #8e9992 !important; background: #f4f6f5 !important; font-style: italic; }
 .replying-to { position: absolute; top: -27px; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between; overflow: hidden; padding: 5px 8px; border-radius: 7px 7px 0 0; background: #eef5f0; color: #63796b; font-size: 8px; white-space: nowrap; text-overflow: ellipsis; }
 .replying-to button { display: grid; place-items: center; padding: 2px; border: 0; background: transparent; color: inherit; cursor: pointer; }
 .message-compose { position: relative; }

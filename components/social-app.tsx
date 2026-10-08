@@ -1334,7 +1334,7 @@ function FriendProfilePage({ supabase, userId, onMessage, onBack }: { supabase: 
 }
 
 type ConversationSummary = { id: string; title: string | null; is_group: boolean; members: Person[]; lastMessage: string; updatedAt: string };
-type MessageRow = { id: string; sender_id: string; content: string; created_at: string; profiles: ProfileRow | ProfileRow[] | null };
+type MessageRow = { id: string; sender_id: string; content: string; created_at: string; deleted_at: string | null; profiles: ProfileRow | ProfileRow[] | null };
 
 function MessagesPanel({ supabase, user, friendships, currentUser, openWithUserId, onOpenedUser, onBlock, onSignIn, onError }: { supabase: SupabaseClient | null; user: { id: string } | null; friendships: FriendshipRow[]; currentUser: Person; openWithUserId: string | null; onOpenedUser: () => void; onBlock: (profileId: string) => Promise<void>; onSignIn: () => void; onError: (message: string) => void }) {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -1362,13 +1362,17 @@ function MessagesPanel({ supabase, user, friendships, currentUser, openWithUserI
     if (!ids.length) { setConversations([]); setSelectedId(null); return; }
     const { data, error: conversationError } = await supabase.from("conversations").select("id, title, is_group, created_at, conversation_members(user_id, profiles(id, display_name, username, avatar_url))").in("id", ids).order("created_at", { ascending: false });
     if (conversationError) { onError(`Could not load conversations: ${conversationError.message}`); return; }
-    const { data: latestMessages } = await supabase.from("messages").select("conversation_id, content, created_at").in("conversation_id", ids).order("created_at", { ascending: false }).limit(100);
-    const latestByConversation = new Map<string, { content: string; created_at: string }>();
-    for (const item of latestMessages || []) if (!latestByConversation.has(item.conversation_id)) latestByConversation.set(item.conversation_id, item);
+    const [{ data: latestMessages }, { data: hiddenMessages }] = await Promise.all([
+      supabase.from("messages").select("id, conversation_id, content, created_at, deleted_at").in("conversation_id", ids).order("created_at", { ascending: false }).limit(100),
+      supabase.from("message_user_deletions").select("message_id").eq("user_id", user.id),
+    ]);
+    const hiddenIds = new Set((hiddenMessages || []).map((item) => item.message_id as string));
+    const latestByConversation = new Map<string, { content: string; created_at: string; deleted_at: string | null }>();
+    for (const item of latestMessages || []) if (!hiddenIds.has(item.id) && !latestByConversation.has(item.conversation_id)) latestByConversation.set(item.conversation_id, item);
     const mapped = (data || []).map((conversation) => {
       const members = (conversation.conversation_members || []).map((member: { user_id: string; profiles: ProfileRow | ProfileRow[] | null }) => toPerson(member.profiles, member.user_id));
       const latest = latestByConversation.get(conversation.id);
-      return { id: conversation.id, title: conversation.title, is_group: conversation.is_group, members, lastMessage: latest?.content || "Start a conversation", updatedAt: latest?.created_at || conversation.created_at } as ConversationSummary;
+      return { id: conversation.id, title: conversation.title, is_group: conversation.is_group, members, lastMessage: latest?.deleted_at ? "This message was unsent" : latest?.content || "Start a conversation", updatedAt: latest?.created_at || conversation.created_at } as ConversationSummary;
     }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     setConversations(mapped);
     setSelectedId((current) => current && mapped.some((conversation) => conversation.id === current) ? current : mapped[0]?.id || null);
@@ -1398,10 +1402,16 @@ function MessagesPanel({ supabase, user, friendships, currentUser, openWithUserI
 
   const loadMessages = useCallback(async () => {
     if (!supabase || !selectedId) { setMessages([]); return; }
-    const { data, error: messageError } = await supabase.from("messages").select("id, sender_id, content, created_at, profiles!messages_sender_id_fkey(id, display_name, username, avatar_url)").eq("conversation_id", selectedId).order("created_at", { ascending: true }).limit(100);
+    if (!user) { setMessages([]); return; }
+    const [{ data, error: messageError }, { data: hiddenMessages, error: hiddenError }] = await Promise.all([
+      supabase.from("messages").select("id, sender_id, content, created_at, deleted_at, profiles!messages_sender_id_fkey(id, display_name, username, avatar_url)").eq("conversation_id", selectedId).order("created_at", { ascending: true }).limit(100),
+      supabase.from("message_user_deletions").select("message_id").eq("user_id", user.id),
+    ]);
     if (messageError) { onError(`Could not load messages: ${messageError.message}`); return; }
-    setMessages((data || []) as MessageRow[]);
-  }, [onError, selectedId, supabase]);
+    if (hiddenError) { onError(`Could not load hidden messages: ${hiddenError.message}`); return; }
+    const hiddenIds = new Set((hiddenMessages || []).map((item) => item.message_id as string));
+    setMessages(((data || []) as MessageRow[]).filter((item) => !hiddenIds.has(item.id)));
+  }, [onError, selectedId, supabase, user]);
 
   useEffect(() => { void loadMessages(); }, [loadMessages]);
 
@@ -1499,6 +1509,40 @@ function MessagesPanel({ supabase, user, friendships, currentUser, openWithUserI
     setChatMenuOpen(false);
   }
 
+  async function deleteConversationForMe() {
+    if (!supabase || !user || !selectedId) return;
+    const conversationId = selectedId;
+    if (!window.confirm("Delete this conversation from your inbox? Other members will still have their copy.")) return;
+    setBusy(true);
+    const { error: deleteError } = await supabase.from("conversation_members").delete().eq("conversation_id", conversationId).eq("user_id", user.id);
+    setBusy(false);
+    if (deleteError) { onError(`Could not delete this conversation: ${deleteError.message}`); return; }
+    setSelectedId(null);
+    setMessages([]);
+    setChatMenuOpen(false);
+    await loadConversations();
+  }
+
+  async function deleteMessageForMe(item: MessageRow) {
+    if (!supabase || !user) return;
+    setBusy(true);
+    const { error: deleteError } = await supabase.from("message_user_deletions").insert({ message_id: item.id, user_id: user.id });
+    setBusy(false);
+    if (deleteError) { onError(`Could not delete this message for you: ${deleteError.message}`); return; }
+    setMessages((current) => current.filter((messageItem) => messageItem.id !== item.id));
+    await loadConversations();
+  }
+
+  async function unsendMessage(item: MessageRow) {
+    if (!supabase || !user || item.sender_id !== user.id || item.deleted_at) return;
+    setBusy(true);
+    const { error: unsendError } = await supabase.from("messages").update({ content: "This message was unsent", deleted_at: new Date().toISOString() }).eq("id", item.id).eq("sender_id", user.id).is("deleted_at", null);
+    setBusy(false);
+    if (unsendError) { onError(`Could not unsend this message: ${unsendError.message}`); return; }
+    await loadMessages();
+    await loadConversations();
+  }
+
   return (
     <div className="messages-card">
       <div className="message-list">
@@ -1515,10 +1559,10 @@ function MessagesPanel({ supabase, user, friendships, currentUser, openWithUserI
         {user && !conversations.length && <p className="muted-copy message-signin">No conversations yet. Start one with a friend.</p>}
       </div>
       {selected ? <div className="conversation">
-        <div className="conversation-header"><img src={selected.members.find((member) => member.id !== user?.id)?.avatar || DEFAULT_AVATAR} alt="" /><div><strong>{title}</strong><span>{remoteTyping ? "Typing…" : onlineUsers.length > 1 ? "Friend is online" : selected.is_group ? `${selected.members.length} members` : "Private conversation"}</span></div><button aria-label="Conversation options" onClick={() => setChatMenuOpen((open) => !open)}><MoreHorizontal size={20} /></button>{chatMenuOpen && <div className="chat-control-menu"><button onClick={toggleMute}>{mutedChats.includes(selected.id) ? "Unmute chat" : "Mute chat"}</button><button onClick={() => { setSelectedId(null); setChatMenuOpen(false); }}>Close conversation</button>{!selected.is_group && <button onClick={() => { const friendId = selected.members.find((member) => member.id !== user?.id)?.id; if (friendId) void onBlock(friendId); setChatMenuOpen(false); }}>Block person</button>}</div>}</div>
+        <div className="conversation-header"><img src={selected.members.find((member) => member.id !== user?.id)?.avatar || DEFAULT_AVATAR} alt="" /><div><strong>{title}</strong><span>{remoteTyping ? "Typing…" : onlineUsers.length > 1 ? "Friend is online" : selected.is_group ? `${selected.members.length} members` : "Private conversation"}</span></div><button aria-label="Conversation options" onClick={() => setChatMenuOpen((open) => !open)}><MoreHorizontal size={20} /></button>{chatMenuOpen && <div className="chat-control-menu"><button onClick={toggleMute}>{mutedChats.includes(selected.id) ? "Unmute chat" : "Mute chat"}</button><button onClick={() => { setSelectedId(null); setChatMenuOpen(false); }}>Close conversation</button><button onClick={() => void deleteConversationForMe()} disabled={busy}>Delete conversation for me</button>{!selected.is_group && <button onClick={() => { const friendId = selected.members.find((member) => member.id !== user?.id)?.id; if (friendId) void onBlock(friendId); setChatMenuOpen(false); }}>Block person</button>}</div>}</div>
         <div className="conversation-body">{messages.length === 0 && <p className="message-empty">Say hello and start this conversation.</p>}{messages.map((item) => {
           const author = toPerson(item.profiles, item.sender_id);
-          return <div className={`message-line ${item.sender_id === user?.id ? "message-line-own" : ""}`} key={item.id}>{selected.is_group && item.sender_id !== user?.id && <small>{author.name}</small>}<div className={`chat-bubble ${item.sender_id === user?.id ? "sent" : "received"}`}>{item.content}</div><div className="message-inline-actions"><button onClick={() => setReplyTo(item)}>Reply</button><button onClick={() => { setMessage(`Forwarded message: “${item.content}”`); setReplyTo(null); }}>Forward</button></div><time>{timeAgo(item.created_at)}</time></div>;
+          return <div className={`message-line ${item.sender_id === user?.id ? "message-line-own" : ""}`} key={item.id}>{selected.is_group && item.sender_id !== user?.id && <small>{author.name}</small>}<div className={`chat-bubble ${item.sender_id === user?.id ? "sent" : "received"} ${item.deleted_at ? "chat-bubble-deleted" : ""}`}>{item.deleted_at ? "This message was unsent" : item.content}</div><div className="message-inline-actions"><button onClick={() => setReplyTo(item)} disabled={Boolean(item.deleted_at)}>Reply</button><button onClick={() => { setMessage(`Forwarded message: “${item.content}”`); setReplyTo(null); }} disabled={Boolean(item.deleted_at)}>Forward</button><button onClick={() => void deleteMessageForMe(item)} disabled={busy}>Delete for me</button>{item.sender_id === user?.id && !item.deleted_at && <button className="message-unsend-action" onClick={() => void unsendMessage(item)} disabled={busy}>Unsend for everyone</button>}</div><time>{timeAgo(item.created_at)}</time></div>;
         })}</div>
         <form className="message-compose" onSubmit={(event) => void sendMessage(event)}>
           {replyTo && <div className="replying-to">Replying to “{replyTo.content.slice(0, 72)}”<button type="button" aria-label="Cancel reply" onClick={() => setReplyTo(null)}><X size={13} /></button></div>}
